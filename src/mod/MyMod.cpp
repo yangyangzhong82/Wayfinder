@@ -1,6 +1,7 @@
 #include "mod/MyMod.h"
 
 #include "ll/api/mod/RegisterHelper.h"
+#include "wayfinder/Wayfinder.h"
 
 namespace my_mod {
 
@@ -10,20 +11,19 @@ MyMod& MyMod::getInstance() {
 }
 
 bool MyMod::load() {
-    getSelf().getLogger().debug("Loading...");
-    // Code for loading the mod goes here.
-    return true;
+    try {
+        mWayfinder = std::make_shared<wayfinder::Wayfinder>(getSelf());
+        return true;
+    } catch (std::exception const& ex) {
+        getSelf().getLogger().error("Wayfinder configuration failed: {}", ex.what());
+        return false;
+    }
 }
 
-bool MyMod::enable() {
-    getSelf().getLogger().debug("Enabling...");
-    // Code for enabling the mod goes here.
-    return true;
-}
+bool MyMod::enable() { return mWayfinder && mWayfinder->enable(); }
 
 bool MyMod::disable() {
-    getSelf().getLogger().debug("Disabling...");
-    // Code for disabling the mod goes here.
+    if (mWayfinder) mWayfinder->disable();
     return true;
 }
 

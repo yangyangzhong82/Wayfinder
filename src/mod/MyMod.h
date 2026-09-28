@@ -2,6 +2,10 @@
 
 #include "ll/api/mod/NativeMod.h"
 
+namespace wayfinder {
+class Wayfinder;
+}
+
 namespace my_mod {
 
 class MyMod {
@@ -27,7 +31,8 @@ public:
     // bool unload();
 
 private:
-    ll::mod::NativeMod& mSelf;
+    ll::mod::NativeMod&                   mSelf;
+    std::shared_ptr<wayfinder::Wayfinder> mWayfinder;
 };
 
 } // namespace my_mod
