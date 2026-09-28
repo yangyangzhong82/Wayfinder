@@ -12,7 +12,9 @@
 
 namespace wayfinder {
 namespace {
-constexpr char magic[8]       = {'W', 'A', 'Y', 'M', 'A', 'P', '0', '2'};
+constexpr char magic[8]       = {'W', 'A', 'Y', 'M', 'A', 'P', '0', '4'};
+constexpr char touchedMagic[8] = {'W', 'A', 'Y', 'M', 'A', 'P', '0', '3'};
+constexpr char depthMagic[8]  = {'W', 'A', 'Y', 'M', 'A', 'P', '0', '2'};
 constexpr char legacyMagic[8] = {'W', 'A', 'Y', 'M', 'A', 'P', '0', '1'}; // No water depth; read-only.
 void           put32(std::ostream& stream, std::uint32_t value) {
     for (unsigned shift = 0; shift < 32; shift += 8) stream.put(static_cast<char>((value >> shift) & 255u));
@@ -44,9 +46,11 @@ std::vector<TileRecord> readMap(std::filesystem::path const& path, std::string c
     std::ifstream       stream(path, std::ios::binary);
     std::array<char, 8> header{};
     stream.read(header.data(), header.size());
-    bool legacy = stream && std::equal(header.begin(), header.end(), std::begin(legacyMagic));
-    if (!stream || (!legacy && !std::equal(header.begin(), header.end(), std::begin(magic))))
-        throw std::runtime_error("Unsupported Wayfinder map format");
+    bool legacy      = stream && std::equal(header.begin(), header.end(), std::begin(legacyMagic));
+    bool current     = stream && std::equal(header.begin(), header.end(), std::begin(magic));
+    bool depthFormat = stream && std::equal(header.begin(), header.end(), std::begin(depthMagic));
+    bool touchedFormat = stream && std::equal(header.begin(), header.end(), std::begin(touchedMagic));
+    if (!stream || (!legacy && !current && !depthFormat && !touchedFormat)) throw std::runtime_error("Unsupported Wayfinder map format");
     auto length = get32(stream);
     if (length > 4096) throw std::runtime_error("Invalid map identity length");
     std::string savedIdentity(length, char{});
@@ -54,7 +58,7 @@ std::vector<TileRecord> readMap(std::filesystem::path const& path, std::string c
     if (!stream || savedIdentity != identity) throw std::runtime_error("Map belongs to a different world/profile");
     auto count = get32(stream);
     if (count > 65536) throw std::runtime_error("Map exceeds maximum supported tile count");
-    auto expectedSize = 8ull + 4 + length + 4 + static_cast<std::uint64_t>(count) * (12 + 256 * 8);
+    auto expectedSize = 8ull + 4 + length + 4 + static_cast<std::uint64_t>(count) * ((current ? 24 : touchedFormat ? 20 : 12) + 256 * 8);
     if (std::filesystem::file_size(path) != expectedSize) throw std::runtime_error("Map record size mismatch");
     std::vector<TileRecord> records;
     records.reserve(std::min<std::size_t>(count, capacity));
@@ -63,20 +67,32 @@ std::vector<TileRecord> readMap(std::filesystem::path const& path, std::string c
         record.key.dimension = std::bit_cast<std::int32_t>(get32(stream));
         record.key.x         = std::bit_cast<std::int32_t>(get32(stream));
         record.key.z         = std::bit_cast<std::int32_t>(get32(stream));
+        if (current) {
+            record.key.slice = std::bit_cast<std::int32_t>(get32(stream));
+            if (record.key.slice != surfaceSlice && (record.key.slice < -4096 || record.key.slice > 4095))
+                throw std::runtime_error("Invalid map cave slice");
+        }
         if (record.key.x < -1875000 || record.key.x > 1875000 || record.key.z < -1875000 || record.key.z > 1875000)
             throw std::runtime_error("Map chunk coordinates outside supported world bounds");
+        if (current || touchedFormat) {
+            auto low = get32(stream), high = get32(stream);
+            record.tile.lastTouched = low | (static_cast<std::uint64_t>(high) << 32);
+        } else record.tile.lastTouched = n + 1;
         for (auto& cell : record.tile.cells) {
-            cell.color  = get32(stream);
-            auto word = get32(stream);
+            cell.color = get32(stream);
+            auto word  = get32(stream);
             if (legacy) {
                 auto height = std::bit_cast<std::int32_t>(word);
                 if (height < -32768 || height > 32767) throw std::runtime_error("Invalid map height");
                 cell.height = static_cast<std::int16_t>(height);
             } else {
                 // v2: low 16 bits signed height, bits 16-23 water depth, top byte reserved.
-                if ((word >> 24) != 0) throw std::runtime_error("Invalid map cell reserved bits");
+                auto flags = word >> 24;
+                if ((!current && flags) || flags > MapCell::voidSpace)
+                    throw std::runtime_error("Invalid map cell reserved bits");
                 cell.height = std::bit_cast<std::int16_t>(static_cast<std::uint16_t>(word & 0xffffu));
                 cell.depth  = static_cast<std::uint8_t>(word >> 16);
+                cell.flags  = static_cast<std::uint8_t>(flags);
             }
             if (cell.known() && (cell.color >> 24) != 255u) throw std::runtime_error("Invalid map pixel alpha");
         }
@@ -101,11 +117,15 @@ void writeMap(std::filesystem::path const& path, std::string const& identity, st
             put32(stream, static_cast<std::uint32_t>(record.key.dimension));
             put32(stream, static_cast<std::uint32_t>(record.key.x));
             put32(stream, static_cast<std::uint32_t>(record.key.z));
+            put32(stream, static_cast<std::uint32_t>(record.key.slice));
+            put32(stream, static_cast<std::uint32_t>(record.tile.lastTouched));
+            put32(stream, static_cast<std::uint32_t>(record.tile.lastTouched >> 32));
             for (auto const& cell : record.tile.cells) {
                 put32(stream, cell.color);
                 put32(
                     stream,
                     std::bit_cast<std::uint16_t>(cell.height) | (static_cast<std::uint32_t>(cell.depth) << 16)
+                        | (static_cast<std::uint32_t>(cell.flags) << 24)
                 );
             }
         }

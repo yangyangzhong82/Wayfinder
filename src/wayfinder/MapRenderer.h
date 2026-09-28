@@ -1,15 +1,15 @@
 #pragma once
 
 #include "wayfinder/MapCore.h"
+#include "wayfinder/EntityRadar.h"
+#include "wayfinder/MapUi.h"
+#include "wayfinder/Navigation.h"
+#include "wayfinder/Settings.h"
 #include <memory>
 #include <string>
 
 class MinecraftUIRenderContext;
 namespace wayfinder {
-struct MapRect {
-    float x{}, y{}, width{}, height{};
-    bool  contains(float px, float py) const { return px >= x && py >= y && px < x + width && py < y + height; }
-};
 class MapRenderer {
 public:
     MapRenderer();
@@ -18,16 +18,36 @@ public:
         MinecraftUIRenderContext&         context,
         MapRect const&                    area,
         MapView const&                    view,
+        MapView const&                    textureView,
         std::vector<std::uint32_t> const& pixels,
         std::uint64_t                     imageRevision,
         double                            playerX,
         double                            playerZ,
         float                             yaw,
         std::string const&                caption,
-        bool                              fullscreen
+        bool                              fullscreen,
+        Settings const&                   settings,
+        Locale const&                     locale,
+        bool                              following,
+        std::string const&                biome,
+        std::string const&                layerLabel
     );
-    // HUD overlays do not automatically acquire the native screen cursor.
-    void renderCursor(MinecraftUIRenderContext& context, float x, float y, bool dragging);
+    void renderMarkers(
+        MinecraftUIRenderContext& context,
+        MapRect const&            area,
+        MapView const&            view,
+        Navigation const&         navigation,
+        int                       dimension,
+        double                    playerX,
+        double                    playerZ,
+        bool                      fullscreen,
+        Settings const&           settings,
+        Locale const&             locale
+    );
+    void renderUi(MinecraftUIRenderContext& context, UiFrame const& frame, float mouseX, float mouseY);
+    void renderEntities(MinecraftUIRenderContext& context, MapRect const& area, MapView const& view,
+                        std::span<EntityMarker const> entities, MapLayer layer, double playerX, double playerY,
+                        double playerZ, Settings const& settings, Locale const& locale, bool fullscreen);
     // Called at a UI callback, or while the mod is being disabled on the client thread.
     void reset();
 

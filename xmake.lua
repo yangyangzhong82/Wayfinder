@@ -60,13 +60,42 @@ target("Wayfinder")
     --  add_includedirs("src-client")
     --  add_files("src-client/**.cpp")
     end
+target_end()
 
-target("wayfinder-core-tests")
-    set_default(false)
-    set_kind("binary")
-    set_languages("c++20")
-    set_toolchains("clang-cl")
-    add_defines("NOMINMAX", "UNICODE")
-    add_cxxflags("/utf-8", "/EHsc")
-    add_includedirs("src")
-    add_files("tests/MapCoreTests.cpp", "src/wayfinder/MapStorage.cpp")
+-- Engine-independent regression executables; excluded from the shipped mod/default build.
+for name, sources in pairs({
+    WayfinderEntityTests = {
+        "tests/EntityTests.cpp", "src/wayfinder/Settings.cpp", "src/wayfinder/MapMenu.cpp",
+        "src/wayfinder/Navigation.cpp", "src/wayfinder/MapStorage.cpp", "src/wayfinder/Locale.cpp"
+    },
+    WayfinderTerrainTests = {
+        "tests/TerrainTests.cpp", "src/wayfinder/MapArchive.cpp", "src/wayfinder/MapStorage.cpp",
+        "src/wayfinder/Settings.cpp", "src/wayfinder/Navigation.cpp",
+        "src/wayfinder/MapMenu.cpp", "src/wayfinder/Locale.cpp"
+    },
+    WayfinderFeatureTests = {
+        "tests/FeatureTests.cpp", "src/wayfinder/MapArchive.cpp", "src/wayfinder/MapStorage.cpp",
+        "src/wayfinder/Navigation.cpp", "src/wayfinder/Locale.cpp", "src/wayfinder/MapMenu.cpp",
+        "src/wayfinder/MapMarkers.cpp", "src/wayfinder/Settings.cpp", "src/wayfinder/WayfinderView.cpp"
+    },
+    WayfinderNavigationTests = {
+        "tests/NavigationPersistenceTests.cpp", "src/wayfinder/Navigation.cpp",
+        "src/wayfinder/MapStorage.cpp", "src/wayfinder/Locale.cpp"
+    },
+    WayfinderMarkerTests = {
+        "tests/MarkerAtlasTests.cpp", "src/wayfinder/MarkerAtlas.cpp"
+    }
+}) do
+    target(name)
+        set_default(false)
+        set_kind("binary")
+        set_languages("c++20")
+        set_toolchains("clang-cl")
+        set_targetdir("build/tests")
+        add_defines("NOMINMAX", "UNICODE")
+        add_cxflags("/EHsc", "/utf-8", "/W4")
+        add_includedirs("src")
+        add_packages("levilamina")
+        add_files(table.unpack(sources))
+    target_end()
+end
