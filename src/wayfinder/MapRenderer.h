@@ -1,6 +1,8 @@
 #pragma once
 
 #include "wayfinder/MapCore.h"
+#include "wayfinder/BiomeOverlay.h"
+#include "wayfinder/ExplorationTrail.h"
 #include "wayfinder/EntityRadar.h"
 #include "wayfinder/MapUi.h"
 #include "wayfinder/Navigation.h"
@@ -20,6 +22,7 @@ public:
         MapView const&                    view,
         MapView const&                    textureView,
         std::vector<std::uint32_t> const& pixels,
+        BiomeMap const&                   biomes,
         std::uint64_t                     imageRevision,
         double                            playerX,
         double                            playerZ,
@@ -30,15 +33,21 @@ public:
         Locale const&                     locale,
         bool                              following,
         std::string const&                biome,
-        std::string const&                layerLabel
+        std::string const&                cursorInfo,
+        std::string const&                layerLabel,
+        ExplorationTrail const&           trail,
+        MapLayer                          layer,
+        bool                              showPlayer
     );
     void renderMarkers(
         MinecraftUIRenderContext& context,
         MapRect const&            area,
         MapView const&            view,
         Navigation const&         navigation,
+        MapLayer                  layer,
         int                       dimension,
         double                    playerX,
+        double                    playerY,
         double                    playerZ,
         bool                      fullscreen,
         Settings const&           settings,

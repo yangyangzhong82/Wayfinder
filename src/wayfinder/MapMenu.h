@@ -3,11 +3,12 @@
 #include "wayfinder/MapUi.h"
 #include "wayfinder/Navigation.h"
 #include "wayfinder/Settings.h"
+#include <set>
 
 namespace wayfinder {
 class MapMenu {
 public:
-    enum class Page { Map, List, Edit, Settings, Locate, Context, Entities };
+    enum class Page { Map, List, Edit, Settings, Locate, Context, Entities, Explore, Groups };
     Locale      locale;
     Page        page{Page::Map};
     UiAction    focus{UiAction::None};
@@ -15,8 +16,15 @@ public:
     std::string entitySearch;
     std::vector<std::string> observedEntityTypes;
     int loadedEntities{}, nearbyEntities{}, visibleEntities{};
+    std::vector<MapLayer> knownLayers;
+    MapLayer displayedLayer;
+    bool layerLocked{}, retracing{}, confirmClearTrail{}, contextCanTeleport{true}, trailSaveFailed{};
+    std::size_t trailPoints{};
     Waypoint    draft;
     WaypointQuery query;
+    bool batchMode{};
+    std::set<std::uint64_t> selectedWaypoints;
+    std::string batchGroup;
     int         offset{}, visibleRows{1}, rowCount{};
     int         settingsTab{};
     float       contextX{}, contextY{};
@@ -35,6 +43,7 @@ public:
     void cancelField();
     void append(std::string const& input);
     void backspace();
+    bool textField() const;
     // Settings/navigation are caller-owned copies, committed only after saving.
     // Returns 1 for navigation changes, 2 for settings, 3 to locate, 4 to create at located coordinates.
     int     action(UiButton const& button, Settings& settings, Navigation& navigation);

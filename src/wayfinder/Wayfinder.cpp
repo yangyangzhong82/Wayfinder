@@ -81,6 +81,7 @@ void Wayfinder::disable() {
     mImpl->rendering.renderer.reset();
     auto mapMouse = std::move(mImpl->input.mapMouse);
     lock.unlock();
+    mImpl->ui.textInput.shutdown();
     mapMouse.reset();
 }
 } // namespace wayfinder

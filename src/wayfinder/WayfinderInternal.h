@@ -1,10 +1,13 @@
 #pragma once
 // Private composition and cross-component contracts; not part of the mod API.
 #include "wayfinder/Wayfinder.h"
+#include "wayfinder/ExplorationTrail.h"
 #include "wayfinder/EntityRadar.h"
 #include "wayfinder/MapArchive.h"
 #include "wayfinder/MapMenu.h"
+#include "wayfinder/NativeTextInput.h"
 #include "wayfinder/MapMouse.h"
+#include "wayfinder/MapInspection.h"
 #include "wayfinder/MapRenderer.h"
 #include "wayfinder/TerrainSampler.h"
 #include "wayfinder/WayfinderView.h"
@@ -33,7 +36,10 @@ struct Wayfinder::Impl {
             std::string biome;
             Clock::time_point lastBiome{};
         } player;
+        CursorBiome cursorBiome;
+        Clock::time_point lastCursorBiome{};
         MapLayer layer;
+        int overworldSkyDarken{};
         std::vector<EntityMarker> entities;
         Clock::time_point lastEntities{};
 
@@ -49,6 +55,11 @@ struct Wayfinder::Impl {
                 MapLayer layer;
                 std::uint64_t revision{};
                 std::vector<std::uint32_t> pixels;
+                BiomeMap biomes;
+                bool biomeRegions{};
+                MapLighting lighting;
+                std::optional<MapInspectionPoint> biomePoint;
+                std::string pointBiome;
                 std::optional<PointRequest> point;
                 MapCell pointCell;
                 std::unordered_map<MapLayer, MapBounds, MapLayerHash> bounds;
@@ -66,7 +77,9 @@ struct Wayfinder::Impl {
             std::shared_ptr<std::vector<TileRecord>> inFlightChanges;
             std::vector<TileRecord> retryChanges;
             std::optional<MapView> requestedView;
+            MapLayer requestedLayer;
             std::optional<PointRequest> requestedPoint;
+            std::optional<MapInspectionPoint> requestedBiome;
             std::unordered_map<MapLayer, MapBounds, MapLayerHash> bounds;
             std::filesystem::path savePath;
             std::future<Result> saveTask;
@@ -88,6 +101,13 @@ struct Wayfinder::Impl {
         TerrainSampler sampler;
         IClientInstance* client{}; // Cleared on exit; never captured by a worker.
         Navigation navigation;
+        ExplorationTrail trail;
+        struct TrailSave { std::uint64_t revision{}; std::string error; };
+        std::future<TrailSave> trailSaveTask;
+        std::filesystem::path trailPath;
+        std::uint64_t savedTrailRevision{};
+        Clock::time_point lastTrailSave{};
+        bool trailSaveFailed{};
         DeathTracker deathTracker;
         std::filesystem::path navigationPath;
         std::string identity;
@@ -98,6 +118,7 @@ struct Wayfinder::Impl {
         void begin(Impl& app, IClientInstance& ci);
         void end(Impl& app);
         void persistNavigation(Impl& app);
+        void persistTrail(Impl& app, bool force);
         void sampleEntities(Impl& app);
         void tick(Impl& app, ll::event::ClientLevelTickEvent& event);
         void changed(ll::event::BlockChangedEvent& event);
@@ -128,13 +149,19 @@ struct Wayfinder::Impl {
         MapMenu state;
         UiFrame frame;
         std::string gameLanguage{"en_US"};
+        NativeTextInput textInput;
+        UiAction nativeField{UiAction::None};
+        MapMenu::Page nativePage{MapMenu::Page::Map};
 
         void refreshLocale(Settings const& settings);
+        void refreshExploration(Impl& app);
         void newWaypoint(Impl& app, bool atPointer);
         void openContext(Impl& app);
         void teleport(Impl& app);
         void action(Impl& app, UiButton const& button);
         void key(Impl& app, int code, bool first);
+        void openText(Impl& app);
+        void pollText(Impl& app);
     };
 
     struct Rendering {
@@ -143,6 +170,9 @@ struct Wayfinder::Impl {
         MapView renderedView; // Visible world rectangle shared by overlays and pointer projection.
         MapView textureView;  // World rectangle of pixels, including the minimap border.
         std::vector<std::uint32_t> pixels;
+        BiomeMap biomes;
+        bool rasterBiomes{};
+        MapLighting rasterLighting;
         std::uint64_t imageRevision{}, rasterRevision{};
         MapLayer rasterLayer{std::numeric_limits<int>::min()};
         Clock::time_point lastRaster{};

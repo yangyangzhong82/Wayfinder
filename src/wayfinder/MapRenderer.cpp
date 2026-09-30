@@ -1,6 +1,7 @@
 #include "wayfinder/MapRenderer.h"
 #include "wayfinder/MapMarkers.h"
 #include "wayfinder/MapOverlays.h"
+#include "wayfinder/SlimeChunks.h"
 #include "wayfinder/MarkerAtlas.h"
 #include "wayfinder/PortraitPixels.h"
 #include "wayfinder/PortraitDraw.h"
@@ -50,6 +51,10 @@ struct MapRenderer::Impl {
     std::unique_ptr<mce::TexturePtr>   texture;
     std::unique_ptr<mce::TexturePtr>   markerTexture;
     std::uint64_t                      revision = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t                      trailRevision{};
+    bool                               trailVisible{};
+    bool                               slimeVisible{};
+    bool                               biomeVisible{};
     int                                width{}, height{};
     HashedString                       material{"ui_textured_and_glcolor"};
 
@@ -162,6 +167,7 @@ void MapRenderer::render(
     MapView const&                    view,
     MapView const&                    textureView,
     std::vector<std::uint32_t> const& pixels,
+    BiomeMap const&                   biomes,
     std::uint64_t                     imageRevision,
     double                            playerX,
     double                            playerZ,
@@ -172,7 +178,11 @@ void MapRenderer::render(
     Locale const&                     locale,
     bool                              following,
     std::string const&                biome,
-    std::string const&                layerLabel
+    std::string const&                cursorInfo,
+    std::string const&                layerLabel,
+    ExplorationTrail const&           trail,
+    MapLayer                          layer,
+    bool                              showPlayer
 ) {
     if (pixels.size() != static_cast<std::size_t>(textureView.width) * textureView.height) return;
     auto group = ctx.mClient.getTextureGroup();
@@ -183,7 +193,12 @@ void MapRenderer::render(
     }
     // Also recover after a resource-pack reload invalidates the texture group entry.
     bool loaded = group->isLoaded(mImpl->location, false, cg::TextureSetLayerType::Color);
-    if (!loaded || !mImpl->texture || mImpl->revision != imageRevision) {
+    bool slimeVisible = settings.showSlimeChunks
+        && slimeOverlayVisible(layer, textureView, view.width * view.blocksPerPixel / area.width);
+    if (!loaded || !mImpl->texture || mImpl->revision != imageRevision || mImpl->trailVisible != settings.showTrail
+        || mImpl->slimeVisible != slimeVisible
+        || mImpl->biomeVisible != settings.showBiomeRegions
+        || (settings.showTrail && mImpl->trailRevision != trail.revision)) {
         mce::Image image(
             static_cast<uint32>(textureView.width),
             static_cast<uint32>(textureView.height),
@@ -192,7 +207,13 @@ void MapRenderer::render(
         );
         image.resizeImageBytesToFitImageDescription();
         if (image.mImageBytes.size() != pixels.size() * sizeof(std::uint32_t)) return;
-        std::memcpy(image.mImageBytes.data(), pixels.data(), image.mImageBytes.size());
+        if (settings.showBiomeRegions || slimeVisible || (settings.showTrail && !trail.points.empty())) {
+            auto composited = pixels;
+            if (settings.showBiomeRegions) overlayBiomes(composited, textureView, biomes);
+            if (slimeVisible) overlaySlimeChunks(composited, textureView, layer);
+            if (settings.showTrail) overlayTrail(composited, textureView, layer, trail.points, settings.terrainPixelScale);
+            std::memcpy(image.mImageBytes.data(), composited.data(), image.mImageBytes.size());
+        } else std::memcpy(image.mImageBytes.data(), pixels.data(), image.mImageBytes.size());
         cg::ImageBuffer buffer(std::move(image));
         bool            sameSize = loaded && mImpl->width == textureView.width && mImpl->height == textureView.height;
         if (!sameSize || !group->updateTextureInPlace(mImpl->location, buffer)) {
@@ -204,6 +225,10 @@ void MapRenderer::render(
         mImpl->width    = textureView.width;
         mImpl->height   = textureView.height;
         mImpl->revision = imageRevision;
+        mImpl->trailRevision = trail.revision;
+        mImpl->trailVisible = settings.showTrail;
+        mImpl->slimeVisible = slimeVisible;
+        mImpl->biomeVisible = settings.showBiomeRegions;
     }
     auto const& data = mImpl->texture->mClientTexture;
     if (!data) return;
@@ -224,6 +249,35 @@ void MapRenderer::render(
                   {uv.x, uv.y}, {uv.width, uv.height}, false);
     ctx.flushImages(mce::Color(255, 255, 255), fullscreen ? 1.0f : settings.minimapOpacity, mImpl->material);
     ctx.setClippingRectangle(rect(area.x, area.y, area.width, area.height));
+    if (settings.showBiomeRegions && !biomes.cells.empty()) {
+        std::vector<MapRect> placed;
+        auto origin = view.worldAt(0, 0);
+        double blocksPerGuiX = view.width * view.blocksPerPixel / area.width;
+        double blocksPerGuiZ = view.height * view.blocksPerPixel / area.height;
+        for (auto const& region : biomes.labels) {
+            if (placed.size() >= (fullscreen ? 24u : 4u)) break;
+            auto name = locale.biome(biomes.names[region.biome - 1]);
+            float scale = fullscreen ? 0.75f : 0.6f;
+            float width = 6;
+            for (unsigned char ch : name) if ((ch & 0xc0) != 0x80) width += (ch < 0x80 ? 6.0f : 9.0f) * scale;
+            float height = 11;
+            float x = area.x + float((region.x - origin[0]) / blocksPerGuiX);
+            float z = area.y + float((region.z - origin[1]) / blocksPerGuiZ);
+            MapRect box{x - width / 2, z - height / 2, width, height};
+            if (!area.contains(box.x, box.y) || !area.contains(box.x + box.width, box.y + box.height)) continue;
+            if (std::any_of(placed.begin(), placed.end(), [&](auto const& old) { return box.intersects(old); })) continue;
+            // Require the full label footprint to remain inside this biome.
+            bool fits = true;
+            for (int oz : {-1, 0, 1}) for (int ox : {-1, 0, 1})
+                if (biomes.atWorld(region.x + ox * width * 0.5 * blocksPerGuiX,
+                                   region.z + oz * height * 0.5 * blocksPerGuiZ) != region.biome) fits = false;
+            if (!fits) continue;
+            ctx.fillRectangle(rect(box.x, box.y, box.width, box.height), mce::Color(12, 17, 23), 0.72f);
+            label(ctx, box.x + 3, box.y + 1, width - 6, name, scale);
+            placed.push_back(box);
+        }
+        ctx.flushText(0.0f, std::nullopt);
+    }
     if (settings.showChunkBorders) {
         auto origin     = view.worldAt(0, 0);
         auto vertical   = chunkLines(origin[0], view.width * view.blocksPerPixel / area.width, area.width);
@@ -242,6 +296,8 @@ void MapRenderer::render(
         area.y - 11,
         area.width,
         fullscreen ? "WAYFINDER | " + layerLabel + " | " + locale.tr(following ? "Following" : "Free view")
+            + (settings.showSlimeChunks && layer.dimension == 0
+                ? " | " + locale.tr(slimeVisible ? "Slime chunks (green)" : "Slime chunks: zoom in") : "")
                    : layerLabel,
         0.7f
     );
@@ -259,7 +315,7 @@ void MapRenderer::render(
     auto  point = view.worldAt(0, 0);
     float px    = area.x + static_cast<float>((playerX - point[0]) / (view.width * view.blocksPerPixel)) * area.width;
     float py    = area.y + static_cast<float>((playerZ - point[1]) / (view.height * view.blocksPerPixel)) * area.height;
-    if (area.contains(px, py)) {
+    if (showPlayer && area.contains(px, py)) {
         float angle = yaw * std::numbers::pi_v<float> / 180.0f;
         float dx = -std::sin(angle), dy = std::cos(angle);
         for (int i = 0; i < 6; ++i) {
@@ -309,7 +365,8 @@ void MapRenderer::render(
             area.x,
             area.y + area.height + 16,
             area.width,
-            locale.tr("Drag: pan | Click marker: edit | Shift+click: navigate | Right click: menu"),
+            cursorInfo.empty() ? locale.tr("Drag: pan | Click marker: edit | Shift+click: navigate | Right click: menu")
+                               : cursorInfo,
             0.65f
         );
     }
@@ -401,8 +458,10 @@ void MapRenderer::renderMarkers(
     MapRect const&            area,
     MapView const&            view,
     Navigation const&         navigation,
+    MapLayer                  layer,
     int                       dimension,
     double                    playerX,
+    double                    playerY,
     double                    playerZ,
     bool                      fullscreen,
     Settings const&           settings,
@@ -418,38 +477,40 @@ void MapRenderer::renderMarkers(
     // Check/upload once per marker pass. Moving, renaming, recoloring or selecting
     // a waypoint only changes its UVs, never the atlas pixels.
     bool atlasReady = mImpl->prepareMarkerAtlas();
-    bool queuedImages = false;
     ctx.saveCurrentClippingRectangle();
     struct Restore {
         MinecraftUIRenderContext& ctx;
         ~Restore() { ctx.restoreSavedClippingRectangle(); }
     } restore{ctx};
     ctx.setClippingRectangle(rect(area.x, area.y, area.width, area.height));
-    auto markers = layoutMarkers(navigation, view, area, dimension, settings.showWaypoints, settings.showNavigation, fullscreen);
-    for (auto const& marker : markers) {
-        auto const& p = *navigation.find(marker.id);
-        auto const& position = marker.projection;
-        float x = marker.x, y = marker.y;
-        if (atlasReady) {
-            int icon = position.outside ? MarkerAtlas::arrowIcon(position.dx, position.dy) : p.icon;
-            auto uv = MarkerAtlas::uv(icon, p.color, marker.target);
-            // Keep the TexturePtr alive through the shared flush below. The
-            // colored glyph, dark badge and target outline are one textured quad.
-            auto const& data = mImpl->markerTexture->mClientTexture;
-            ctx.drawImage(data->mClientTexture.get(), {x - 8, y - 8},
-                          {float(MarkerAtlas::tileSize), float(MarkerAtlas::tileSize)},
-                          {uv[0], uv[1]}, {1.0f / MarkerAtlas::columns, 1.0f / MarkerAtlas::rows}, false);
-            queuedImages = true;
+    auto markers = layoutMarkers(navigation, view, area, layer.dimension, settings.showWaypoints, settings.showNavigation, fullscreen,
+        layer.underground() ? std::optional<int>(layer.referenceY()) : std::nullopt, fullscreen);
+    for (float opacity : {0.4f, 1.0f}) {
+        bool queuedImages = false;
+        for (auto const& marker : markers) {
+            if (marker.opacity != opacity) continue;
+            auto const& p = *navigation.find(marker.id);
+            auto const& position = marker.projection;
+            float x = marker.x, y = marker.y;
+            if (atlasReady) {
+                int icon = position.outside ? MarkerAtlas::arrowIcon(position.dx, position.dy) : p.icon;
+                auto uv = MarkerAtlas::uv(icon, p.color, marker.target);
+                // Keep each opacity batch separate; targets remain bright and draw last.
+                auto const& data = mImpl->markerTexture->mClientTexture;
+                ctx.drawImage(data->mClientTexture.get(), {x - 8, y - 8},
+                              {float(MarkerAtlas::tileSize), float(MarkerAtlas::tileSize)},
+                              {uv[0], uv[1]}, {1.0f / MarkerAtlas::columns, 1.0f / MarkerAtlas::rows}, false);
+                queuedImages = true;
+            }
         }
+        if (queuedImages) ctx.flushImages(mce::Color(255, 255, 255), opacity, mImpl->material);
     }
     auto target = navigation.find(navigation.target);
-    // Flush under the map clip, before labels, target description or menu UI.
-    if (queuedImages) ctx.flushImages(mce::Color(255, 255, 255), 1.0f, mImpl->material);
     for (auto const& marker : markers) {
         if (!marker.label) continue;
         auto const& box = *marker.label;
         ctx.setClippingRectangle(rect(box.x, box.y, box.width, box.height));
-        label(ctx, box.x, box.y, box.width, waypointName(*navigation.find(marker.id), locale), 0.65f);
+        label(ctx, box.x, box.y, box.width, waypointName(*navigation.find(marker.id), locale), 0.65f, marker.opacity);
         ctx.flushText(0.0f, std::nullopt);
     }
     ctx.flushText(0.0f, std::nullopt);
@@ -463,7 +524,7 @@ void MapRenderer::renderMarkers(
             area.x + 2,
             y,
             area.width - 4,
-            targetDescription(*target, dimension, playerX, playerZ, locale),
+            targetDescription(*target, dimension, playerX, playerY, playerZ, locale),
             0.65f
         );
         ctx.flushText(0.0f, std::nullopt);

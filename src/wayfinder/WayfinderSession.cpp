@@ -6,6 +6,7 @@
 #include "mc/client/multiplayer/ClientLevel.h"
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/world/level/BlockPos.h"
+#include "mc/world/level/dimension/Dimension.h"
 #include "mc/world/level/biome/Biome.h"
 #include "mc/world/level/chunk/LevelChunk.h"
 
@@ -42,6 +43,7 @@ void Wayfinder::Impl::Session::begin(Impl& app, IClientInstance& ci) {
     history.retryChanges.clear();
     history.requestedView.reset();
     history.requestedPoint.reset();
+    history.requestedBiome.reset();
     history.bounds.clear();
     history.lastError = {};
     sampler.reset();
@@ -50,6 +52,7 @@ void Wayfinder::Impl::Session::begin(Impl& app, IClientInstance& ci) {
     app.rendering.failed = false;
     player.dimension = static_cast<int>(ci.getLocalPlayer()->getDimensionId());
     layer = MapLayer{player.dimension};
+    overworldSkyDarken = 0;
     entities.clear();
     lastEntities = {};
     app.ui.state.observedEntityTypes.clear();
@@ -64,8 +67,23 @@ void Wayfinder::Impl::Session::begin(Impl& app, IClientInstance& ci) {
     navigation = {};
     navigationDirty = false;
     deathTracker.reset();
+    trail = {};
+    savedTrailRevision = 0;
+    trailSaveFailed = false;
+    lastTrailSave = Clock::now();
+    trailPath = app.mod.getDataDir() / "trails" / storageName(identity);
+    trailPath.replace_extension(".json");
+    try { trail = readTrail(trailPath, identity); }
+    catch (std::exception const& ex) {
+        app.mod.getLogger().warn("Wayfinder could not load trail: {}", ex.what());
+        trailPath += ".recovery-" + std::to_string(unixTime());
+    }
+    app.view.lockedLayer.reset();
+    app.ui.state.knownLayers.clear();
     player.biome.clear();
     player.lastBiome = {};
+    cursorBiome = {};
+    lastCursorBiome = {};
     app.ui.state.open(MapMenu::Page::Map);
     app.ui.state.query = {};
     try {
@@ -89,6 +107,7 @@ void Wayfinder::Impl::Session::begin(Impl& app, IClientInstance& ci) {
 void Wayfinder::Impl::Session::end(Impl& app) {
     app.input.closeMap(app, false);
     persistNavigation(app);
+    persistTrail(app, true);
     deathTracker.reset();
     history.requestedView.reset();
     history.save(app, true);
@@ -98,6 +117,9 @@ void Wayfinder::Impl::Session::end(Impl& app) {
     history.retryChanges.clear();
     history.bounds.clear();
     client = nullptr;
+    history.requestedBiome.reset();
+    cursorBiome = {};
+    lastCursorBiome = {};
     identity.clear();
     entities.clear();
     lastEntities = {};
@@ -124,6 +146,7 @@ void Wayfinder::Impl::Session::tick(Impl& app, ll::event::ClientLevelTickEvent& 
     auto source = client->getRegion();
     if (!localPlayer) return;
     bool died = deathTracker.observe(localPlayer->isAlive());
+    if (!localPlayer->isAlive()) trail.stopRetrace();
     if (died && app.settings.recordDeaths) {
         auto const& deathPos = localPlayer->getPosition();
         if (std::isfinite(deathPos.x) && std::isfinite(deathPos.y) && std::isfinite(deathPos.z) &&
@@ -136,8 +159,10 @@ void Wayfinder::Impl::Session::tick(Impl& app, ll::event::ClientLevelTickEvent& 
         }
     }
     if (navigationDirty && Clock::now() - lastNavigationAttempt >= std::chrono::seconds(5)) persistNavigation(app);
-    if (!source) return;
+    persistTrail(app, false);
+    if (!source) { trail.stopRetrace(); return; }
     if (!foreground()) {
+        trail.stopRetrace();
         app.input.closeMap(app, false);
         app.input.heldKeys.clear();
         app.input.consumedKeys.clear();
@@ -165,27 +190,48 @@ void Wayfinder::Impl::Session::tick(Impl& app, ll::event::ClientLevelTickEvent& 
         layer = MapLayer{newDimension};
         history.requestedView.reset();
         history.requestedPoint.reset();
+        history.requestedBiome.reset();
         player.biome.clear();
         player.lastBiome = {};
+        cursorBiome = {};
+        lastCursorBiome = {};
         sampler.reset();
         app.rendering.pixels.clear();
     }
     // Client region and player dimension may briefly disagree during a portal transition.
-    if (static_cast<int>(source->getDimensionId()) != player.dimension) return;
+    if (static_cast<int>(source->getDimensionId()) != player.dimension) { trail.stopRetrace(); return; }
+    if (player.dimension == 0) overworldSkyDarken = std::clamp<int>(source->getDimension().mSkyDarken->mValue, 0, 15);
     auto nextLayer = TerrainSampler::selectLayer(player.dimension, blockCoordinate(player.y), app.settings, layer);
     if (nextLayer != layer) {
+        auto oldDisplay = app.view.displayedLayer(layer);
         layer = nextLayer;
         entities.clear();
         lastEntities = {};
         sampler.reset();
-        history.requestedView.reset();
-        history.requestedPoint.reset();
-        app.rendering.pixels.clear();
-        app.rendering.lastRaster = {};
-        // A selected teleport destination belongs to its old floor.
-        if (app.ui.state.page == MapMenu::Page::Context) app.ui.state.open(MapMenu::Page::Map);
+        if (oldDisplay != app.view.displayedLayer(layer)) {
+            history.requestedView.reset();
+            history.requestedPoint.reset();
+            app.rendering.pixels.clear();
+            app.rendering.lastRaster = {};
+            // A selected teleport destination belongs to its old floor.
+            if (app.ui.state.page == MapMenu::Page::Context) app.ui.state.open(MapMenu::Page::Map);
+        }
     }
+    if (localPlayer->isAlive()) trail.observe(layer, player.x, player.y, player.z, unixTime(), app.settings.recordTrail);
+    if (std::find(app.ui.state.knownLayers.begin(), app.ui.state.knownLayers.end(), layer) == app.ui.state.knownLayers.end())
+        app.ui.state.knownLayers.push_back(layer);
     sampleEntities(app);
+    if (!app.settings.showBiome || !app.view.fullscreen || app.ui.state.page != MapMenu::Page::Map)
+        cursorBiome.select({});
+    if (cursorBiome.point && Clock::now() - lastCursorBiome >= std::chrono::milliseconds(100)) {
+        lastCursorBiome = Clock::now();
+        auto const& point = *cursorBiome.point;
+        auto name = TerrainSampler::biome(*source, point.layer, point.x, point.z, app.settings);
+        if (name.empty()) name = cache.biome(point.layer, point.x, point.z);
+        if (!name.empty()) cursorBiome.identifier = std::move(name);
+        else if (!cursorBiome.historyRead && (history.archive || history.openTask.valid()))
+            history.requestedBiome = point;
+    }
     if (app.settings.showBiome && Clock::now() - player.lastBiome >= std::chrono::milliseconds(500)) {
         player.lastBiome = Clock::now();
         BlockPos position{blockCoordinate(player.x), blockCoordinate(player.y), blockCoordinate(player.z)};
@@ -199,7 +245,7 @@ void Wayfinder::Impl::Session::tick(Impl& app, ll::event::ClientLevelTickEvent& 
     if (history.retryChanges.empty() && cache.pendingEvictions() < cache.capacity() &&
         Clock::now() - history.lastError >= std::chrono::seconds(5))
         sampler.tick(*source, layer, static_cast<int>(std::floor(player.x)),
-                     static_cast<int>(std::floor(player.z)), cache, app.settings);
+                     static_cast<int>(std::floor(player.z)), cache, app.settings, client->getTextureGroup().get());
     if (history.ready()) history.finish(app);
     history.save(app, false);
 }

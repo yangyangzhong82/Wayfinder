@@ -9,10 +9,12 @@ class SampleSchedule {
 public:
     void clear() {
         mSweep.clear();
+        mNear.clear();
         mDirty.clear();
         mDirtySet.clear();
         mCenter.reset();
         mLastDirty = false;
+        mNearTurns = 0;
     }
     bool contains(TileKey key) const {
         return mCenter && key.layer() == mCenter->layer() && std::abs(key.x - mCenter->x) <= mRadius
@@ -39,8 +41,18 @@ public:
                     if (queued.insert(key).second) mSweep.push_back(key);
                 }
         std::stable_partition(mSweep.begin(), mSweep.end(), [&](auto key) { return !known(key); });
+        // A small local ring refreshes lighting/building changes promptly instead
+        // of waiting for the entire (up to 33x33 chunk) discovery sweep.
+        mNear.clear();
+        for (int ring = 0; ring <= std::min(radius, 2); ++ring)
+            for (int z = -ring; z <= ring; ++z)
+                for (int x = -ring; x <= ring; ++x)
+                    if (std::max(std::abs(x), std::abs(z)) == ring)
+                        mNear.push_back({center.dimension, center.x + x, center.z + z, center.slice});
+        mNearTurns = 0;
     }
     void dirty(TileKey key) {
+        if (!contains(key)) return;
         if (mDirty.size() < 2048 && mDirtySet.insert(key).second) mDirty.push_back(key);
     }
     std::optional<TileKey> next() {
@@ -53,6 +65,16 @@ public:
             return key;
         }
         if (mSweep.empty()) return {};
+        // Two local chunks for every full-sweep chunk. Dirty work still alternates
+        // with regular work, so neither a busy farm nor local refresh starves discovery.
+        if (!mNear.empty() && mNearTurns++ < 2) {
+            auto key = mNear.front();
+            mNear.pop_front();
+            mNear.push_back(key);
+            mLastDirty = false;
+            return key;
+        }
+        mNearTurns = 0;
         auto key = mSweep.front();
         mSweep.pop_front();
         mSweep.push_back(key);
@@ -61,10 +83,11 @@ public:
     }
 
 private:
-    std::deque<TileKey>                      mSweep, mDirty;
+    std::deque<TileKey>                      mSweep, mNear, mDirty;
     std::unordered_set<TileKey, TileKeyHash> mDirtySet;
     std::optional<TileKey>                   mCenter;
     int                                      mRadius{};
     bool                                     mLastDirty{};
+    int                                      mNearTurns{};
 };
 } // namespace wayfinder

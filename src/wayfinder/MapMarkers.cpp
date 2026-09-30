@@ -2,14 +2,19 @@
 
 namespace wayfinder {
 std::vector<PlacedMarker> layoutMarkers(Navigation const& nav, MapView const& view, MapRect const& area,
-                                       int dimension, bool showWaypoints, bool showNavigation, bool labels) {
+                                        int dimension, bool showWaypoints, bool showNavigation, bool labels,
+                                        std::optional<int> referenceY, bool fullscreen) {
     std::vector<PlacedMarker> result;
     if (area.width <= 0 || area.height <= 0) return result;
     auto add = [&](Waypoint const& point, bool target) {
         if (point.dimension != dimension) return;
+        // An explicitly selected target stays visible even in a hidden group.
+        if (!target && !nav.groupVisible(point.group, fullscreen)) return;
         auto p = projectMarker(view, point.x + 0.5, point.z + 0.5, area.width, area.height);
         if (p.outside && !target) return;
         result.push_back({point.id, area.x + float(p.x), area.y + float(p.y), p, target, {}});
+        if (!target && referenceY && point.y && floorDiv(*point.y, caveSliceHeight) != floorDiv(*referenceY, caveSliceHeight))
+            result.back().opacity = 0.4f;
     };
     if (showWaypoints)
         for (auto const& p : nav.points) if (p.id != nav.target || !showNavigation) add(p, false);

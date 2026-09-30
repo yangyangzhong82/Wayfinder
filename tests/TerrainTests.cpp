@@ -2,6 +2,7 @@
 #include "wayfinder/MapMenu.h"
 #include "wayfinder/SampleSchedule.h"
 #include "wayfinder/TerrainColumn.h"
+#include "wayfinder/TerrainTextureColor.h"
 #include <bit>
 #include <chrono>
 #include <fstream>
@@ -145,6 +146,126 @@ void columnTests() {
     require(!columnFloor(100, minY, read), "Bounded scans do not invent void before reaching the bottom");
     require(!caveColumn(0, 1, 1, read), "Invalid build limits are rejected");
     require(caveColumn(200, minY, maxY, read) == std::nullopt, "Above-roof sampling stays bounded");
+}
+void surfaceLiquidTests() {
+    constexpr int minY = -64, maxY = 160;
+    auto stone = ColumnBlock{ColumnKind::Solid, rgba(110, 110, 110)};
+    auto lava = ColumnBlock{ColumnKind::Lava, rgba(255, 100, 18)};
+    auto water = ColumnBlock{ColumnKind::Water, rgba(40, 100, 210)};
+    std::array<std::optional<ColumnBlock>, maxY - minY> blocks;
+    blocks.fill(ColumnBlock{});
+    int reads = 0;
+    auto read = [&](int y) {
+        ++reads;
+        require(y >= minY && y < maxY, "Liquid surface scans stay within build bounds");
+        return blocks[y - minY];
+    };
+    blocks[64 - minY] = stone;
+    blocks[65 - minY] = blocks[66 - minY] = lava;
+    require(columnFloor(64, minY, read)->color == stone.color,
+        "Reproduce the old solid-height scan showing the grey pool bottom");
+    auto cell = surfaceColumn(64, minY, maxY, read);
+    require(cell && cell->height == 66 && cell->color == lava.color && cell->depth == 0,
+        "A surface lava pool displays its orange liquid surface instead of stone below");
+    require(surfaceColumn(66, minY, maxY, read) == cell,
+        "Already-correct liquid height hints retain the same surface");
+    blocks[68 - minY] = stone;
+    require(surfaceColumn(68, minY, maxY, read)->color == stone.color,
+        "Solid roofs continue to hide lava underneath");
+    blocks[68 - minY] = ColumnBlock{};
+    blocks[67 - minY].reset();
+    require(!surfaceColumn(64, minY, maxY, read), "Missing data above lava cannot expose the pool bottom");
+    blocks[67 - minY] = ColumnBlock{};
+    blocks[65 - minY] = blocks[66 - minY] = water;
+    cell = surfaceColumn(64, minY, maxY, read);
+    require(cell && cell->height == 66 && cell->depth == 2 && cell->color == water.color,
+        "Water above the solid hint retains its surface and depth");
+    blocks[65 - minY] = blocks[66 - minY] = ColumnBlock{}; // Water disabled in the reader.
+    require(surfaceColumn(64, minY, maxY, read)->color == stone.color,
+        "Excluded water still reveals the solid terrain");
+    blocks.fill(ColumnBlock{});
+    require(surfaceColumn(minY - 1, minY, maxY, read)->flags == MapCell::voidSpace,
+        "An empty surface column remains explored void");
+    blocks[0] = lava;
+    require(surfaceColumn(minY - 1, minY, maxY, read)->height == minY,
+        "Lava at the build floor does not require a solid block underneath");
+    blocks.fill(lava);
+    reads = 0;
+    require(!surfaceColumn(0, minY, maxY, read) && reads <= 65,
+        "Unresolved tall liquid columns stop at the upward scan budget");
+    cell = surfaceColumn(maxY - 2, minY, maxY, read);
+    require(cell && cell->height == maxY - 1 && cell->color == lava.color,
+        "Lava at the build ceiling renders without querying outside the dimension");
+    require(!surfaceColumn(maxY, minY, maxY, read), "Invalid solid-height hints are rejected");
+}
+void samplingScheduleTests() {
+    SampleSchedule schedule;
+    TileKey center{0, -1, 2};
+    schedule.recenter(center, 8, [](TileKey) { return false; });
+    int near = 0, far = 0;
+    for (int i = 0; i < 180; ++i) {
+        auto key = schedule.next();
+        require(key && key->layer() == center.layer(), "Scheduled work stays on the current layer");
+        auto distance = std::max(std::abs(key->x - center.x), std::abs(key->z - center.z));
+        if (distance <= 2) ++near;
+        else ++far;
+    }
+    require(near >= 120, "Nearby chunks receive most terrain refresh turns");
+    require(far >= 30, "Full-area exploration continues while the player is stationary");
+    schedule.dirty({0, 20, 20});
+    schedule.dirty(center);
+    require(schedule.next() == center, "Dirty work in range is serviced immediately");
+    schedule.recenter({0, 20, 20}, 8, [](TileKey) { return false; });
+    for (int i = 0; i < 30; ++i) {
+        auto key = schedule.next();
+        require(key && key->x >= 12 && key->x <= 28 && key->z >= 12 && key->z <= 28,
+            "Moving the player removes old nearby and dirty work");
+    }
+    MapCache cache;
+    MapCell stone{rgba(110, 110, 110), 64};
+    require(cache.put(0, 0, 0, stone, "minecraft:plains"), "First sample changes a tile");
+    cache.takeChanges();
+    auto revision = cache.revision();
+    for (int i = 0; i < 50; ++i)
+        require(!cache.put(0, 0, 0, stone, "minecraft:plains"), "Unchanged near samples are stable");
+    require(cache.revision() == revision && cache.takeChanges().empty(),
+        "Unchanged local rescans do not create disk writes or invalidate the image");
+    require(cache.put(0, 0, 0, stone, "minecraft:forest") && cache.takeChanges().size() == 1,
+        "Biome-only changes still persist");
+}
+void topTextureColorTests() {
+    require(tintTopTexture(rgba(255, 255, 255), rgba(100, 180, 70)) == rgba(100, 180, 70),
+        "White vegetation textures retain the biome tint");
+    require(tintTopTexture(rgba(128, 128, 128), rgba(100, 180, 70)) == rgba(50, 90, 35),
+        "Vegetation retains actual texture brightness instead of a flat biome swatch");
+    require(tintTopTexture(rgba(200, 120, 80), rgba(100, 180, 70)) == rgba(78, 85, 22),
+        "Resource-pack texture channels each receive the biome multiplier once");
+    require(tintTopTexture(rgba(200, 120, 80), rgba(255, 255, 255)) == rgba(200, 120, 80),
+        "A neutral tint preserves the source material colour");
+    std::array<std::uint8_t, 8 * 8 * 4> pixels{};
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+        auto offset = (y * 8 + x) * 4;
+        pixels[offset] = x < 4 ? 200 : 20;
+        pixels[offset + 1] = 40;
+        pixels[offset + 2] = x < 4 ? 20 : 200;
+        pixels[offset + 3] = 255;
+    }
+    auto left = averageTopTexture(pixels, 8, 8, 4, false, 0, 0, 0.5f, 1);
+    auto right = averageTopTexture(pixels, 8, 8, 4, false, 0.5f, 0, 1, 1);
+    require(left == rgba(200, 40, 20) && right == rgba(20, 40, 200),
+        "Top-face UV sampling uses the selected atlas region");
+    require(averageTopTexture(pixels, 8, 8, 4, true, 0, 0, 0.5f, 1) == rgba(20, 40, 200),
+        "BGRA resource images use the correct channel order");
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 4; ++x)
+        pixels[(y * 8 + x) * 4 + 3] = 0;
+    require(averageTopTexture(pixels, 8, 8, 4, false, 0, 0, 1, 1) == rgba(20, 40, 200),
+        "Transparent pixels do not darken the representative material colour");
+    require(!averageTopTexture(pixels, 8, 8, 4, false, 0, 0, 0.5f, 1),
+        "Fully transparent top faces fall back to the map colour");
+    require(!averageTopTexture(pixels, 8, 8, 4, false, 0.5f, 0, 0.5f, 1)
+        && !averageTopTexture(pixels, 8, 8, 4, false, -0.1f, 0, 1, 1)
+        && !averageTopTexture(std::span<std::uint8_t const>(pixels).first(5), 8, 8, 4, false, 0, 0, 1, 1),
+        "Invalid UV rectangles and truncated images retain the safe map-colour fallback");
 }
 void storageTests(TestDirectory const& dir) {
     std::array<MapLayer, 5> layers{
@@ -348,17 +469,109 @@ void settingsTests(TestDirectory const& dir) {
             "Both height controls are reachable in overlay settings"
         );
 }
+void lightingTests(TestDirectory const& dir) {
+    MapCell open{rgba(180, 180, 180), 64, 0, 0, 15, 0};
+    MapCell torch = open;
+    torch.blockLight = 14;
+    MapCell cave = open;
+    cave.skyLight = 0;
+    auto red = [](std::uint32_t color) { return color & 255u; };
+    auto day = litColor(open.color, open, {true, 0});
+    auto night = litColor(open.color, open, {true, 11});
+    auto illuminated = litColor(torch.color, torch, {true, 11});
+    require(day == open.color && red(night) < red(day), "Sky darkening changes daytime terrain to night");
+    require(red(night) >= 75 && red(night) <= 125,
+        "Night midtones stay legible while remaining visibly darker than daytime");
+    require(red(litColor(cave.color, cave, {true, 11})) >= 45,
+        "Dark terrain retains enough brightness to read its material and relief");
+    require(red(illuminated) > red(night), "Torches remain bright at night");
+    require(litColor(cave.color, cave, {true, 0}) == litColor(cave.color, cave, {true, 11}),
+        "Sealed caves do not acquire daylight");
+    auto lava = cave; lava.blockLight = 15;
+    require(litColor(lava.color, lava, {true, 15}) == lava.color, "Full light emission stays visible in darkness");
+    require(litColor(open.color, open, {false, 11}) == open.color, "Disabling lighting preserves original colours");
+    MapCell old{open.color, 64};
+    require(litColor(old.color, old, {true, 11}) == old.color, "Old history does not invent light levels");
+    auto wall = emptyTerrain(64, true);
+    wall.skyLight = wall.blockLight = 0;
+    require(litColor(wall.color, wall, {true, 11}) == wall.color, "Wall colours remain distinct");
+    for (int level = 1; level <= 15; ++level) {
+        cave.blockLight = static_cast<std::uint8_t>(level - 1);
+        auto before = litColor(cave.color, cave, {true, 11});
+        cave.blockLight = static_cast<std::uint8_t>(level);
+        require(red(litColor(cave.color, cave, {true, 11})) > red(before), "Each block light level increases brightness");
+    }
+    MapCache cache;
+    for (int z = -16; z < 16; ++z) for (int x = -16; x < 16; ++x)
+        cache.put(0, x, z, x < 0 ? open : torch);
+    auto revision = cache.revision();
+    cache.put(0, 0, 0, open);
+    require(cache.revision() > revision, "Light-only changes invalidate map pixels");
+    cache.put(0, 0, 0, torch);
+    auto path = dir.path / "lighting.wfmap";
+    {
+        MapArchive archive(path, "lights", 1);
+        archive.update(cache.takeChanges()); archive.flush();
+    }
+    MapArchive restored(path, "lights", 1);
+    require(restored.get(0, -1, 0) == open && restored.get(0, 0, 0) == torch,
+        "Sky and block light survive archive eviction and reopening");
+    for (double scale : {0.125, 0.5, 1.0, 4.0, 32.0}) {
+        MapView view{0, 0, scale, 32, 32};
+        for (int dark : {0, 5, 11, 15}) {
+            auto expected = cache.rasterize(0, view, {true, dark});
+            require(restored.rasterize(0, view, {true, dark}) == expected,
+                "Archive and live lighting agree at close, normal and overview zoom across chunk seams");
+        }
+        require(cache.rasterize(0, view, {true, 0}) != cache.rasterize(0, view, {true, 11}),
+            "A stationary map changes when night falls at every zoom");
+        require(cache.rasterize(0, view) == cache.rasterize(0, view, {false, 11}),
+            "Lighting toggle restores original raster at every zoom");
+    }
+    auto legacy = dir.path / "lighting-v5.wfmap";
+    {
+        std::ofstream out(legacy, std::ios::binary); out << "WAYMAP05";
+        auto word = [&](std::uint32_t value) { for (int i = 0; i < 4; ++i) out.put(char(value >> (i * 8))); };
+        word(3); out << "old"; word(1); word(0); word(0); word(0); word(surfaceSlice); word(1); word(0);
+        for (int i = 0; i < 256; ++i) { word(old.color); word(64); }
+        word(1); word(16); out << "minecraft:plains";
+        for (int i = 0; i < 256; ++i) word(1);
+    }
+    auto records = readMap(legacy, "old", 1);
+    require(records[0].tile.cells[0] == old && records[0].tile.biomes.get(0) == "minecraft:plains",
+        "Version 5 terrain and biome history loads with explicitly unknown light");
+    auto malformed = dir.path / "bad-light.wfmap";
+    writeMap(malformed, "old", records);
+    {
+        std::fstream file(malformed, std::ios::binary | std::ios::in | std::ios::out);
+        file.seekp(8 + 4 + 3 + 4 + 24 + 256 * 8);
+        file.put(16); // Invalid skylight in the first v6 light record.
+    }
+    rejects([&] { readMap(malformed, "old", 1); }, "Invalid light records are rejected");
+    Settings settings;
+    require(settings.showLighting, "Night and lighting are enabled by default");
+    MapMenu menu; Navigation navigation;
+    UiButton toggle; toggle.action = UiAction::Lighting;
+    require(menu.action(toggle, settings, navigation) == 2 && !settings.showLighting,
+        "Lighting switch updates settings");
+    saveSettings(dir.path, settings);
+    require(!loadSettings(dir.path).showLighting, "Lighting preference survives reload");
+}
 } // namespace
 int main() {
     try {
         TestDirectory dir;
         selectionTests();
         columnTests();
+        surfaceLiquidTests();
+        samplingScheduleTests();
+        topTextureColorTests();
         storageTests(dir);
         legacyTests(dir);
         settingsTests(dir);
+        lightingTests(dir);
         std::cout << checks
-                  << " checks passed: terrain selection, cave/Nether/End columns, layers, archives and legacy "
+                  << " checks passed: terrain selection, cave/Nether/End columns, layers, lighting, archives and legacy "
                      "compatibility.\n";
     } catch (std::exception const& error) {
         std::cerr << "FAILED after " << checks << " checks: " << error.what() << '\n';

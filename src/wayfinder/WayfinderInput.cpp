@@ -25,6 +25,8 @@ struct InputTransition {
 void Wayfinder::Impl::Input::followPlayer(Impl& app) {
     pressedMarker = 0;
     app.view.follow(app.session.player.x, app.session.player.z);
+    app.session.history.requestedView.reset();
+    app.session.history.requestedPoint.reset();
     panKeys.clear();
     dragging = false;
     app.rendering.pixels.clear();
@@ -32,6 +34,8 @@ void Wayfinder::Impl::Input::followPlayer(Impl& app) {
 }
 
 void Wayfinder::Impl::Input::closeMap(Impl& app, bool grab) {
+    app.ui.textInput.cancel();
+    app.ui.nativeField = UiAction::None;
     pressedMarker = 0;
     if (!app.view.fullscreen) return;
     app.view.fullscreen = false;
@@ -96,6 +100,11 @@ void Wayfinder::Impl::Input::key(Impl& app, ll::event::KeyInputEvent& event) {
     }
     if (event.isCancelled()) return;
     bool first = heldKeys.insert(code).second;
+    if (app.ui.textInput.active()) {
+        consumedKeys.insert(code);
+        event.cancel();
+        return;
+    }
     if (!app.session.client || !foreground() || !hud(*app.session.client)) return;
     if (app.view.fullscreen && app.ui.state.page != MapMenu::Page::Map) {
         consumedKeys.insert(code);
@@ -144,8 +153,9 @@ void Wayfinder::Impl::Input::key(Impl& app, ll::event::KeyInputEvent& event) {
         break;
     case 'F': {
         auto const& bounds = app.session.history.bounds;
-        auto found = bounds.find(app.session.layer);
-        app.view.fit(app.session.cache.bounds(app.session.layer),
+        auto layer = app.view.displayedLayer(app.session.layer);
+        auto found = bounds.find(layer);
+        app.view.fit(app.session.cache.bounds(layer),
                      found == bounds.end() ? std::nullopt : std::optional<MapBounds>(found->second));
     } break;
     case VK_ADD:
@@ -190,6 +200,7 @@ void Wayfinder::Impl::Input::mouse(Impl& app, ll::event::MouseInputEvent& event)
         else consumedMouse.erase(button);
     }
     event.cancel();
+    if (app.ui.textInput.active()) return;
     // One absolute coordinate source only. Relative/raw event coordinates
     // must never be mixed with the Windows desktop pointer.
     if (!pollPointer(app)) return;
@@ -211,7 +222,7 @@ void Wayfinder::Impl::Input::mouse(Impl& app, ll::event::MouseInputEvent& event)
                 dragging = !wasModal && app.view.area.contains(x, y);
                 if (dragging) {
                     auto markers = layoutMarkers(app.session.navigation, app.rendering.renderedView, app.view.area,
-                        app.session.player.dimension, app.settings.showWaypoints, app.settings.showNavigation, false);
+                        app.view.displayedLayer(app.session.layer).dimension, app.settings.showWaypoints, app.settings.showNavigation, false);
                     pressedMarker = hitMarker(markers, x, y);
                     pressX = x;
                     pressY = y;

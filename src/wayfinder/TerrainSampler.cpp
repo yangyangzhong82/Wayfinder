@@ -9,10 +9,12 @@
 #include "mc/world/level/chunk/LevelChunk.h"
 #include "mc/world/level/chunk/SubChunk.h"
 #include "mc/world/level/material/Material.h"
+#include "mc/deps/core/string/HashedString.h"
 #include <chrono>
 
 namespace wayfinder {
 void TerrainSampler::reset() {
+    mTextures.reset();
     mSchedule.clear();
     mCurrent.reset();
     mLayer.reset();
@@ -20,7 +22,9 @@ void TerrainSampler::reset() {
 }
 void TerrainSampler::markDirty(int dimension, int blockX, int blockZ) {
     if (mLayer && mLayer->dimension == dimension)
-        mSchedule.dirty({dimension, floorDiv(blockX, 16), floorDiv(blockZ, 16), mLayer->slice});
+        // A light source affects neighbours up to 15 blocks away, across chunk seams.
+        for (int dz = -1; dz <= 1; ++dz) for (int dx = -1; dx <= 1; ++dx)
+            mSchedule.dirty({dimension, floorDiv(blockX, 16) + dx, floorDiv(blockZ, 16) + dz, mLayer->slice});
 }
 
 namespace {
@@ -70,6 +74,11 @@ MapLayer TerrainSampler::selectLayer(int dimension, int y, Settings const& setti
 
 std::optional<MapCell>
 TerrainSampler::sample(BlockSource& source, MapLayer layer, int x, int z, Settings const& settings) {
+    return sampleWithTextures(source, layer, x, z, settings, nullptr);
+}
+std::optional<MapCell> TerrainSampler::sampleWithTextures(
+    BlockSource& source, MapLayer layer, int x, int z, Settings const& settings, TerrainTextureColors* textures
+) {
     if (static_cast<int>(source.getDimensionId()) != layer.dimension) return {};
     auto chunk = source.getChunk(floorDiv(x, 16), floorDiv(z, 16));
     if (!chunk || chunk->mLoadState->load(std::memory_order_acquire) != ChunkState::Loaded) return {};
@@ -82,23 +91,45 @@ TerrainSampler::sample(BlockSource& source, MapLayer layer, int x, int z, Settin
         auto const& block = source.getBlock(pos);
         auto const& name  = block.getTypeName();
         if (name == "minecraft:client_request_placeholder_block") return {};
-        if (isWater(block) || isWater(source.getLiquidBlock(pos))) {
+        auto const& liquid = source.getLiquidBlock(pos);
+        if (isWater(block) || isWater(liquid)) {
             if (settings.includeWater) {
                 int tint = source.getBiome(pos).mMapWaterColor & 0xffffff;
                 return ColumnBlock{ColumnKind::Water, fromRgb(tint ? tint : 0x3f76e4), !isWater(block)};
             }
             if (isWater(block)) return ColumnBlock{};
         }
-        if (isLava(block) || isLava(source.getLiquidBlock(pos)))
+        if (isLava(block) || isLava(liquid))
             return ColumnBlock{ColumnKind::Lava, rgba(255, 100, 18)};
         if (block.isAir() || (!settings.includeLeaves && name.ends_with("_leaves"))) return ColumnBlock{};
-        if (auto tinted = biomeTint(source, pos, name)) return ColumnBlock{ColumnKind::Solid, *tinted};
+        auto tinted = biomeTint(source, pos, name);
+        if (textures) {
+            auto top = textures->top(block, pos);
+            if (top.material) {
+                auto tint = tinted.value_or(0xffffffffu);
+                return ColumnBlock{ColumnKind::Solid, tintTopTexture(top.material->average(), tint), false,
+                    std::move(top.material), tint, top.rotation, block.mSerializationIdHash};
+            }
+        }
+        if (tinted) return ColumnBlock{ColumnKind::Solid, *tinted, false, {}, *tinted, 0, block.mSerializationIdHash};
         auto color = block.getBlockType().getMapColor(source, pos, block);
         if (!usable(color)) color = *block.getBlockType().mMapColor; // Static per-type colour as fallback.
         if (!usable(color)) return ColumnBlock{};
-        return ColumnBlock{ColumnKind::Solid, toPixel(color)};
+        return ColumnBlock{ColumnKind::Solid, toPixel(color), false, {}, 0xffffffffu, 0, block.mSerializationIdHash};
     };
-    if (layer.underground()) return caveColumn(layer.referenceY(), minY, maxY, read);
+    auto illuminate = [&](std::optional<MapCell> cell) {
+        if (!cell || !cell->floor()) return cell;
+        // Read the air/liquid above the mapped floor, not the opaque floor's zero skylight.
+        int y = int(cell->height) + 1;
+        if (y >= maxY || !readyAt(*chunk, y)) return cell;
+        auto light = source.getBrightnessPair(BlockPos{x, y, z});
+        auto floorLight = source.getBrightnessPair(BlockPos{x, cell->height, z});
+        cell->skyLight = static_cast<std::uint8_t>(std::min<int>(15, light.sky->mValue));
+        cell->blockLight = static_cast<std::uint8_t>(std::min<int>(15,
+            std::max(light.block->mValue, floorLight.block->mValue)));
+        return cell;
+    };
+    if (layer.underground()) return illuminate(caveColumn(layer.referenceY(), minY, maxY, read));
     int top = source.getAboveTopSolidBlock(x, z, settings.includeWater, settings.includeLeaves) - 1;
     if (top >= maxY) return {};
     if (top < minY) {
@@ -106,9 +137,24 @@ TerrainSampler::sample(BlockSource& source, MapLayer layer, int x, int z, Settin
         // actually available. Incomplete client chunks retain the fog pattern.
         for (int y = minY; y < maxY; y = (floorDiv(y, 16) + 1) * 16)
             if (!readyAt(*chunk, y)) return {};
-        return emptyTerrain(minY, false);
+        return illuminate(surfaceColumn(minY - 1, minY, maxY, read));
     }
-    return columnFloor(top, minY, read);
+    return illuminate(surfaceColumn(top, minY, maxY, read));
+}
+
+std::string TerrainSampler::biome(BlockSource& source, MapLayer layer, int x, int z, Settings const& settings,
+                                  std::optional<MapCell> sampled) {
+    if (static_cast<int>(source.getDimensionId()) != layer.dimension) return {};
+    auto chunk = source.getChunk(floorDiv(x, 16), floorDiv(z, 16));
+    if (!chunk || chunk->mLoadState->load(std::memory_order_acquire) != ChunkState::Loaded) return {};
+    int y = layer.underground() ? layer.referenceY() : 0;
+    if (!layer.underground()) {
+        auto cell = sampled ? sampled : sample(source, layer, x, z, settings);
+        if (!cell || !cell->floor()) return {};
+        y = cell->height;
+    }
+    if (y < source.getMinHeight() || y >= source.getMaxHeight() || !readyAt(*chunk, y)) return {};
+    return source.getBiome(BlockPos{x, y, z}).mHash->getString();
 }
 
 void TerrainSampler::tick(
@@ -117,10 +163,12 @@ void TerrainSampler::tick(
     int             playerX,
     int             playerZ,
     MapCache&       cache,
-    Settings const& settings
+    Settings const& settings,
+    mce::TextureGroup* textures
 ) {
     if (static_cast<int>(source.getDimensionId()) != layer.dimension) return;
     if (mLayer != layer) reset();
+    mTextures.beginTick(textures);
     mLayer = layer;
     TileKey center{layer.dimension, floorDiv(playerX, 16), floorDiv(playerZ, 16), layer.slice};
     int     minimapRadius =
@@ -143,7 +191,10 @@ void TerrainSampler::tick(
         }
         int x = mCurrent->x * 16 + mColumn % 16;
         int z = mCurrent->z * 16 + mColumn / 16;
-        if (auto cell = sample(source, layer, x, z, settings)) cache.put(layer, x, z, *cell);
+        if (auto cell = sampleWithTextures(source, layer, x, z, settings, &mTextures)) {
+            retainPendingMaterial(*cell, cache.get(layer, x, z));
+            cache.put(layer, x, z, *cell, biome(source, layer, x, z, settings, cell));
+        }
         ++inspected;
         if (++mColumn == 256) mCurrent.reset();
     }

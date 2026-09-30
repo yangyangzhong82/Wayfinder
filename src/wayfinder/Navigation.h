@@ -26,6 +26,7 @@ struct Waypoint {
     int                color{}, icon{};
     bool               death{};
     std::int64_t       created{}; // Unix seconds, UTC.
+    bool               favorite{};
     bool               operator==(Waypoint const&) const = default;
 };
 void        validateWaypoint(Waypoint const& point);
@@ -36,11 +37,14 @@ std::string dimensionName(int dimension, Locale const& locale = {});
 std::string waypointName(Waypoint const& point, Locale const& locale);
 struct Navigation {
     std::vector<Waypoint> points;
+    std::vector<std::string> hiddenMinimapGroups, hiddenFullMapGroups;
     std::uint64_t         target{}, nextId{1};
     Waypoint const*       find(std::uint64_t id) const;
     std::uint64_t         save(Waypoint point);
     void                  remove(std::uint64_t id);
     void                  recordDeath(int dimension, double x, double y, double z, std::int64_t time);
+    bool                  groupVisible(std::string const& group, bool fullscreen) const;
+    void                  toggleGroup(std::string const& group, bool fullscreen);
 };
 struct WaypointQuery {
     enum class Sort { Recent, Distance, Name };
@@ -72,7 +76,7 @@ struct MarkerProjection {
     double dx{}, dy{};
 };
 MarkerProjection projectMarker(MapView const& view, double worldX, double worldZ, double width, double height);
-std::string      targetDescription(Waypoint const& point, int dimension, double x, double z, Locale const& locale = {});
+std::string      targetDescription(Waypoint const& point, int dimension, double x, double y, double z, Locale const& locale = {});
 Navigation       readNavigation(std::filesystem::path const& path, std::string const& identity);
 void writeNavigation(std::filesystem::path const& path, std::string const& identity, Navigation const& navigation);
 void atomicText(std::filesystem::path const& path, std::string const& text);

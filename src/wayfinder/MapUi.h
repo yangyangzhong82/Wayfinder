@@ -54,6 +54,9 @@ enum class UiAction {
     Scale,
     Compass,
     ChunkBorders,
+    SlimeChunks,
+    BiomeRegions,
+    Lighting,
     Biome,
     Language,
     SettingsTab,
@@ -66,6 +69,8 @@ enum class UiAction {
     SortWaypoints,
     ClearFilters,
     Group,
+    Groups, MinimapGroup, FullMapGroup, Favorite, BatchMode, SelectWaypoint, BatchGroup, ApplyGroup,
+    CoordinateText,
     NavigateExisting,
     MinimapZoomIn,
     MinimapZoomOut,
@@ -78,7 +83,8 @@ enum class UiAction {
     Entities, ShowEntities, EntityFilterMode, EntityPlayersOnly, EntityAll, EntityNone,
     EntityType, EntitySearch, EntityRadiusDown, EntityRadiusUp, EntityPortraits,
     EntityScaleDown, EntityScaleUp, EntityTransparencyDown, EntityTransparencyUp,
-    EntityDepthDown, EntityDepthUp
+    EntityDepthDown, EntityDepthUp,
+    Explore, LiveLayer, SelectLayer, RecordTrail, ShowTrail, Retrace, ClearTrail
 };
 struct UiButton {
     MapRect       rect;
@@ -104,7 +110,7 @@ struct UiFrame {
     }
 };
 // Shared by the toolbar and map viewport so drawing and pointer bounds stay aligned.
-inline float mapToolbarBottom(float width) { return width >= 360 ? 26.0f : 46.0f; }
+inline float mapToolbarBottom(float width) { return width >= 420 ? 26.0f : 46.0f; }
 inline MapRect fullMapArea(float width, float height) {
     float top = mapToolbarBottom(width) + 16;
     return {10, top, width - 20, std::max(24.0f, height - top - 48)};

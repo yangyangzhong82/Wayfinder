@@ -28,7 +28,7 @@ target("Wayfinder")
     add_rules("@levibuildscript/modpacker")
     if is_plat("windows") then
         add_defines("NOMINMAX", "UNICODE")
-        add_syslinks("user32")
+        add_syslinks("user32", "imm32", "comctl32")
         set_exceptions("none") -- To avoid conflicts with /EHa.
         add_cxflags( "/EHa", "/utf-8", "/W4", "/w44265", "/w44289", "/w44296", "/w45263", "/w44738", "/w45204")
         add_cxflags(
@@ -64,6 +64,24 @@ target_end()
 
 -- Engine-independent regression executables; excluded from the shipped mod/default build.
 for name, sources in pairs({
+    WayfinderInteractionTests = {
+        "tests/InteractionTests.cpp", "src/wayfinder/NativeTextInput.cpp", "src/wayfinder/Navigation.cpp",
+        "src/wayfinder/MapStorage.cpp", "src/wayfinder/MapMenu.cpp", "src/wayfinder/MapMarkers.cpp",
+        "src/wayfinder/Settings.cpp", "src/wayfinder/Locale.cpp"
+    },
+    WayfinderMaterialTests = {
+        "tests/TerrainMaterialTests.cpp", "src/wayfinder/MapArchive.cpp", "src/wayfinder/MapStorage.cpp"
+    },
+    WayfinderBiomeTests = {
+        "tests/BiomeTests.cpp", "src/wayfinder/MapArchive.cpp", "src/wayfinder/MapStorage.cpp",
+        "src/wayfinder/MapMenu.cpp", "src/wayfinder/Navigation.cpp", "src/wayfinder/Settings.cpp",
+        "src/wayfinder/Locale.cpp"
+    },
+    WayfinderExplorationTests = {
+        "tests/ExplorationTests.cpp", "src/wayfinder/ExplorationTrail.cpp", "src/wayfinder/Navigation.cpp",
+        "src/wayfinder/MapStorage.cpp", "src/wayfinder/Locale.cpp", "src/wayfinder/MapMenu.cpp",
+        "src/wayfinder/MapMarkers.cpp", "src/wayfinder/Settings.cpp", "src/wayfinder/WayfinderView.cpp"
+    },
     WayfinderEntityTests = {
         "tests/EntityTests.cpp", "src/wayfinder/Settings.cpp", "src/wayfinder/MapMenu.cpp",
         "src/wayfinder/Navigation.cpp", "src/wayfinder/MapStorage.cpp", "src/wayfinder/Locale.cpp"
@@ -96,6 +114,9 @@ for name, sources in pairs({
         add_cxflags("/EHsc", "/utf-8", "/W4")
         add_includedirs("src")
         add_packages("levilamina")
+        if name == "WayfinderInteractionTests" then
+            add_syslinks("user32", "imm32", "comctl32")
+        end
         add_files(table.unpack(sources))
     target_end()
 end

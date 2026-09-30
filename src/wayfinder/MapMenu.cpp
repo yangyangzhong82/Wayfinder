@@ -1,5 +1,6 @@
 #include "wayfinder/MapMenu.h"
 #include "wayfinder/EntityRadar.h"
+#include "wayfinder/CoordinateInput.h"
 #include <charconv>
 #include <cmath>
 #include <ctime>
@@ -37,6 +38,10 @@ void MapMenu::open(Page next) {
     offset        = 0;
     confirmDelete = false;
     confirmReset = false;
+    confirmClearTrail = false;
+    contextCanTeleport = true;
+    batchMode = false;
+    selectedWaypoints.clear();
 }
 void MapMenu::edit(Waypoint point) {
     open(Page::Edit);
@@ -58,6 +63,9 @@ void MapMenu::beginField(UiAction field) {
     selectAll = true;
     if (field == UiAction::Name) text = draft.name;
     if (field == UiAction::Group) text = draft.group;
+    if (field == UiAction::BatchGroup) text = batchGroup;
+    if (field == UiAction::CoordinateText) text = std::to_string(draft.x) + " "
+        + (draft.y ? std::to_string(*draft.y) + " " : "") + std::to_string(draft.z);
     if (field == UiAction::Search) text = query.search;
     if (field == UiAction::EntitySearch) text = entitySearch;
     if (field == UiAction::X) text = std::to_string(draft.x);
@@ -71,6 +79,10 @@ void MapMenu::commitField() {
     } else if (focus == UiAction::Search) {
         query.search = cleanName(text);
         offset = 0;
+    } else if (focus == UiAction::CoordinateText) {
+        draft = withCoordinates(draft, text);
+    } else if (focus == UiAction::BatchGroup) {
+        batchGroup = cleanGroup(text);
     } else if (focus == UiAction::Group) {
         draft.group = cleanGroup(text);
     } else if (focus == UiAction::Name) {
@@ -79,11 +91,20 @@ void MapMenu::commitField() {
         validateWaypoint(changed);
         draft = std::move(changed);
     } else if (focus == UiAction::X || focus == UiAction::Y || focus == UiAction::Z) {
-        if (text.empty() && focus == UiAction::Y) draft.y.reset();
+        auto first = text.find_first_not_of(" \t\r\n");
+        auto trimmed = first == std::string::npos ? std::string{} : text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+        if (trimmed.find_first_of(" \t\r\n,") != std::string::npos) draft = withCoordinates(draft, trimmed);
+        else if (trimmed.empty() && focus == UiAction::Y) draft.y.reset();
         else {
             int value{};
-            auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-            if (error != std::errc{} || end != text.data() + text.size())
+            std::string_view token = trimmed;
+            if (token.starts_with('+')) {
+                token.remove_prefix(1);
+                if (token.empty() || token.front() < '0' || token.front() > '9')
+                    throw std::runtime_error("Enter an integer coordinate");
+            }
+            auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), value);
+            if (error != std::errc{} || end != token.data() + token.size())
                 throw std::runtime_error("Enter an integer coordinate");
             auto changed = draft;
             if (focus == UiAction::X) changed.x = value;
@@ -103,19 +124,18 @@ void MapMenu::cancelField() {
     selectAll = false;
 }
 void MapMenu::append(std::string const& input) {
-    if (focus != UiAction::Name && focus != UiAction::Group && focus != UiAction::Search && focus != UiAction::EntitySearch
-        && focus != UiAction::X && focus != UiAction::Y && focus != UiAction::Z) return;
+    if (!textField()) return;
     std::string next = selectAll ? "" : text;
-    if (focus == UiAction::Name || focus == UiAction::Group || focus == UiAction::Search || focus == UiAction::EntitySearch) next = cleanName(next + input);
+    if (focus == UiAction::Name || focus == UiAction::Group || focus == UiAction::BatchGroup || focus == UiAction::Search || focus == UiAction::EntitySearch) next = cleanName(next + input);
     else {
         auto first = input.find_first_not_of(" \t\r\n");
         if (first == std::string::npos) return;
         auto last = input.find_last_not_of(" \t\r\n");
         for (char ch : std::string_view(input).substr(first, last - first + 1)) {
-            if ((ch >= '0' && ch <= '9') || (ch == '-' && next.empty())) next += ch;
+            if ((ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == ' ' || ch == ',' || ch == '\t' || ch == '\r' || ch == '\n') next += ch;
             else throw std::runtime_error("Enter an integer coordinate");
         }
-        if (next.size() > 10) throw std::runtime_error("Coordinates outside world bounds");
+        if (next.size() > 96) throw std::runtime_error("Coordinates outside world bounds");
     }
     text      = std::move(next);
     selectAll = false;
@@ -125,11 +145,17 @@ void MapMenu::backspace() {
     else eraseLastCharacter(text);
     selectAll = false;
 }
+bool MapMenu::textField() const {
+    return focus == UiAction::Name || focus == UiAction::Group || focus == UiAction::BatchGroup
+        || focus == UiAction::Search || focus == UiAction::EntitySearch || focus == UiAction::CoordinateText
+        || focus == UiAction::X || focus == UiAction::Y || focus == UiAction::Z;
+}
 int MapMenu::action(UiButton const& b, Settings& s, Navigation& nav) {
     if (!b.enabled || b.action == UiAction::None) return 0;
     message.clear();
     errorMessage = false;
     if (b.action != UiAction::ResetSettings) confirmReset = false;
+    if (b.action != UiAction::ClearTrail) confirmClearTrail = false;
     if (b.action == UiAction::SettingsTab) {
         cancelField();
         settingsTab = std::clamp(static_cast<int>(b.id), 0, 2);
@@ -138,20 +164,56 @@ int MapMenu::action(UiButton const& b, Settings& s, Navigation& nav) {
     }
     if (b.action != UiAction::Delete) confirmDelete = false;
     if (b.action == UiAction::Back) {
-        open(page == Page::Entities ? Page::Settings : Page::Map);
+        open(page == Page::Entities ? Page::Settings : page == Page::Groups ? Page::List : Page::Map);
         return 0;
     }
     if (b.action == UiAction::Previous || b.action == UiAction::Next) {
         scroll(b.action == UiAction::Next ? 1 : -1);
         return 0;
     }
-    if (b.action == UiAction::Name || b.action == UiAction::Group || b.action == UiAction::Search || b.action == UiAction::EntitySearch
+    if (b.action == UiAction::Name || b.action == UiAction::Group || b.action == UiAction::BatchGroup
+        || b.action == UiAction::CoordinateText || b.action == UiAction::Search || b.action == UiAction::EntitySearch
         || b.action == UiAction::X || b.action == UiAction::Y || b.action == UiAction::Z) {
         beginField(b.action);
         return 0;
     }
     commitField();
     switch (b.action) {
+    case UiAction::Groups:
+        open(Page::Groups);
+        return 0;
+    case UiAction::MinimapGroup:
+    case UiAction::FullMapGroup:
+        nav.toggleGroup(b.data, b.action == UiAction::FullMapGroup);
+        return 1;
+    case UiAction::Favorite:
+        draft.favorite = !draft.favorite;
+        return 0;
+    case UiAction::BatchMode:
+        batchMode = !batchMode;
+        selectedWaypoints.clear();
+        return 0;
+    case UiAction::SelectWaypoint:
+        if (batchMode && nav.find(b.id)) {
+            if (!selectedWaypoints.erase(b.id)) selectedWaypoints.insert(b.id);
+        }
+        return 0;
+    case UiAction::ApplyGroup:
+        if (selectedWaypoints.empty()) return 0;
+        for (auto& point : nav.points)
+            if (selectedWaypoints.contains(point.id)) point.group = cleanGroup(batchGroup);
+        selectedWaypoints.clear();
+        message = "Waypoint groups updated";
+        return 1;
+    case UiAction::Explore:
+        open(Page::Explore);
+        return 0;
+    case UiAction::RecordTrail:
+        s.recordTrail = !s.recordTrail;
+        break;
+    case UiAction::ShowTrail:
+        s.showTrail = !s.showTrail;
+        break;
     case UiAction::Entities:
         open(Page::Entities);
         return 0;
@@ -296,6 +358,15 @@ int MapMenu::action(UiButton const& b, Settings& s, Navigation& nav) {
     case UiAction::Biome:
         s.showBiome = !s.showBiome;
         break;
+    case UiAction::SlimeChunks:
+        s.showSlimeChunks = !s.showSlimeChunks;
+        break;
+    case UiAction::Lighting:
+        s.showLighting = !s.showLighting;
+        break;
+    case UiAction::BiomeRegions:
+        s.showBiomeRegions = !s.showBiomeRegions;
+        break;
     case UiAction::Language:
         s.language = s.language == "auto" ? "zh_CN" : s.language == "zh_CN" ? "en_US" : "auto";
         break;
@@ -417,25 +488,25 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
             + (draft.y ? std::to_string(*draft.y) : "?") + "  Z: " + std::to_string(draft.z);
         button({x + 6, y + 25, w - 12, 18}, coordinates, UiAction::None);
         button({x + 6, y + 47, w - 12, 18}, locale.tr("Teleport"), UiAction::Teleport);
-        frame.buttons.back().enabled = draft.y.has_value();
+        frame.buttons.back().enabled = draft.y.has_value() && contextCanTeleport;
         button({x + 6, y + 69, w - 12, 18}, locale.tr("Create waypoint here"), UiAction::ContextWaypoint);
         button({x + 6, y + 91, w - 12, 18}, locale.tr("Back / Cancel"), UiAction::Back);
         if (!draft.y && !errorMessage) frame.message = locale.tr(contextLoading
             ? "Loading terrain height..." : "Unknown height; teleport unavailable here.");
+        if (!contextCanTeleport && !errorMessage) frame.message = locale.tr("Teleport destination is in another dimension.");
         return frame;
     }
     if (page == Page::Map) {
-        bool wide = width >= 360;
-        float w = wide ? std::min(66.0f, (width - 36) / 5) : (width - 28) / 3;
-        float start = wide ? width - 10 - (w * 5 + 16) : 10;
-        button({start, 8, w, 18}, locale.tr("+ Here"), UiAction::NewPlayer);
-        button({start + w + 4, 8, w, 18}, locale.tr("Waypoints"), UiAction::List);
-        button({start + (w + 4) * 2, 8, w, 18}, locale.tr("Settings"), UiAction::Settings);
-        float secondWidth = wide ? w : (width - 24) / 2;
-        button({wide ? start + (w + 4) * 3 : 10, wide ? 8.0f : 28.0f, secondWidth, 18},
-               locale.tr("Locate"), UiAction::Locate);
-        button({wide ? start + (w + 4) * 4 : 14 + secondWidth, wide ? 8.0f : 28.0f, secondWidth, 18},
-               locale.tr("Follow"), UiAction::Follow);
+        bool wide = width >= 420;
+        int columns = wide ? 6 : 3;
+        float w = std::min(66.0f, (width - 20 - 4 * (columns - 1)) / columns);
+        float start = wide ? width - 10 - (w * columns + 4 * (columns - 1)) : 10;
+        constexpr char const* labels[]{"+ Here", "Waypoints", "Settings", "Locate", "Explore", "Follow"};
+        constexpr UiAction actions[]{UiAction::NewPlayer, UiAction::List, UiAction::Settings,
+            UiAction::Locate, UiAction::Explore, UiAction::Follow};
+        for (int i = 0; i < 6; ++i)
+            button({start + (i % columns) * (w + 4), 8.0f + (i / columns) * 20, w, 18},
+                   locale.tr(labels[i]), actions[i]);
         return frame;
     }
     frame.modal      = true;
@@ -443,6 +514,8 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
     frame.backdrop = {0, 0, width, height};
     frame.panel   = {(width - panelWidth) / 2, 8, panelWidth, panelHeight};
     frame.title   = page == Page::List   ? locale.tr("Waypoints")
+                  : page == Page::Groups ? locale.tr("Waypoint group visibility")
+                  : page == Page::Explore ? locale.tr("Exploration and layers")
                   : page == Page::Entities ? locale.tr("Entity display")
                   : page == Page::Edit   ? locale.tr("EDIT WAYPOINT")
                   : page == Page::Locate ? locale.tr("LOCATE COORDINATES")
@@ -478,7 +551,42 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         rows.push_back({{{}, locale.tr(key), UiAction::None}, {{}, "-", down}, {{}, "+", up}});
         rows.back().front().value = std::move(value);
     };
-    if (page == Page::Entities) {
+    if (page == Page::Groups) {
+        std::set<std::string> groups{std::string{}};
+        for (auto const& point : nav.points) groups.insert(point.group);
+        groups.insert(nav.hiddenMinimapGroups.begin(), nav.hiddenMinimapGroups.end());
+        groups.insert(nav.hiddenFullMapGroups.begin(), nav.hiddenFullMapGroups.end());
+        for (auto const& group : groups) {
+            row(group.empty() ? locale.tr("Ungrouped") : group, UiAction::None);
+            pair(locale.tr("Minimap") + ": " + locale.tr(nav.groupVisible(group, false) ? "ON" : "OFF"), UiAction::MinimapGroup,
+                 locale.tr("Full map") + ": " + locale.tr(nav.groupVisible(group, true) ? "ON" : "OFF"), UiAction::FullMapGroup);
+            for (auto& b : rows.back()) {
+                b.data = group;
+                b.toggle = true;
+                b.selected = nav.groupVisible(group, b.action == UiAction::FullMapGroup);
+            }
+        }
+        if (frame.message.empty()) frame.message = locale.tr("Navigation target stays visible in hidden groups.");
+    } else if (page == Page::Explore) {
+        toggle("Record trail", UiAction::RecordTrail, s.recordTrail);
+        toggle("Show trail", UiAction::ShowTrail, s.showTrail);
+        row(locale.tr(retracing ? "Stop retracing" : "Retrace footsteps"), UiAction::Retrace);
+        rows.back().front().enabled = retracing || trailPoints > 1;
+        row(locale.tr(confirmClearTrail ? "Confirm clear trail" : "Clear trail"), UiAction::ClearTrail);
+        rows.back().front().enabled = trailPoints != 0;
+        row(locale.tr("Trail points: ") + std::to_string(trailPoints), UiAction::None);
+        row(locale.tr("Follow player layer"), UiAction::LiveLayer);
+        rows.back().front().selected = !layerLocked;
+        for (std::size_t i = 0; i < knownLayers.size(); ++i) {
+            auto layer = knownLayers[i];
+            auto name = dimensionName(layer.dimension, locale) + " | " + locale.tr(layer.underground() ? "terrain.cave" : "terrain.surface");
+            if (layer.underground()) name += " Y " + std::to_string(layer.referenceY());
+            row(std::move(name), UiAction::SelectLayer, i);
+            rows.back().front().selected = layerLocked && displayedLayer == layer;
+        }
+        if (frame.message.empty()) frame.message = locale.tr(trailSaveFailed ? "Trail save failed; retrying"
+            : retracing ? "Recording paused while retracing" : "Select a saved layer; Home returns to player.");
+    } else if (page == Page::Entities) {
         toggle("Show nearby entities", UiAction::ShowEntities, s.showEntities);
         toggle("Entity portraits", UiAction::EntityPortraits, s.entityPortraits);
         stepper("Minimap entity scale", std::to_string(std::lround(s.minimapEntityScale * 100)) + "%",
@@ -511,6 +619,12 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         pair(locale.tr("Group: ") + (!query.group ? locale.tr("All") : query.group->empty() ? locale.tr("Ungrouped") : *query.group),
              UiAction::GroupFilter, locale.tr("Clear filters"), UiAction::ClearFilters);
         pair(locale.tr("+ At player"), UiAction::NewPlayer, locale.tr("Stop navigation"), UiAction::Stop);
+        pair(locale.tr("Group visibility"), UiAction::Groups, locale.tr(batchMode ? "Finish selecting" : "Batch regroup"), UiAction::BatchMode);
+        if (batchMode) {
+            row(locale.tr("Move to group: ") + (focus == UiAction::BatchGroup ? text : batchGroup.empty() ? locale.tr("Ungrouped") : batchGroup), UiAction::BatchGroup);
+            row(locale.tr("Apply to selected: ") + std::to_string(selectedWaypoints.size()), UiAction::ApplyGroup);
+            rows.back().front().enabled = !selectedWaypoints.empty();
+        }
         auto points = queryWaypoints(nav, query, locale);
         if (points.empty()) row(locale.tr(nav.points.empty() ? "No waypoints yet" : "No matching waypoints"), UiAction::None);
         for (auto point : points) {
@@ -518,14 +632,17 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
             if (point->dimension == query.playerDimension)
                 detail += " | " + std::to_string(static_cast<int>(std::round(std::hypot(
                     point->x + 0.5 - query.playerX, point->z + 0.5 - query.playerZ)))) + locale.tr("m");
-            row((nav.target == point->id ? "> " : "") + waypointName(*point, locale)
+            row(std::string(batchMode ? (selectedWaypoints.contains(point->id) ? "[x] " : "[ ] ") : "")
+                + (point->favorite ? "* " : "") + (nav.target == point->id ? "> " : "") + waypointName(*point, locale)
                 + (point->group.empty() ? "" : " [" + point->group + "]") + " | " + detail
-                + (point->death ? " | " + timestamp(point->created) : ""), UiAction::OpenWaypoint, point->id);
+                + (point->death ? " | " + timestamp(point->created) : ""), batchMode ? UiAction::SelectWaypoint : UiAction::OpenWaypoint, point->id);
         }
     } else if (page == Page::Edit) {
         auto field = [&](UiAction action, std::string value) { return focus == action ? "[" + text + "_]" : value; };
         row(locale.tr("Name: ") + field(UiAction::Name, waypointName(draft, locale)), UiAction::Name);
         row(locale.tr("Group: ") + field(UiAction::Group, draft.group.empty() ? locale.tr("Ungrouped") : draft.group), UiAction::Group);
+        toggle("Favorite / pin to top", UiAction::Favorite, draft.favorite);
+        row(locale.tr("Enter / paste X Z or X Y Z"), UiAction::CoordinateText);
         row("X: " + field(UiAction::X, std::to_string(draft.x)), UiAction::X);
         row("Y: " + field(UiAction::Y, draft.y ? std::to_string(*draft.y) : locale.tr("Unknown (optional)")),
             UiAction::Y);
@@ -552,6 +669,8 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         };
         row("X: " + field(UiAction::X, draft.x), UiAction::X);
         row("Z: " + field(UiAction::Z, draft.z), UiAction::Z);
+        row("Y: " + (draft.y ? std::to_string(*draft.y) : locale.tr("Unknown (optional)")), UiAction::Y);
+        row(locale.tr("Enter / paste X Z or X Y Z"), UiAction::CoordinateText);
         row(dimensionName(draft.dimension, locale), UiAction::None);
         row(locale.tr("Jump to coordinates"), UiAction::LocateJump);
         row(locale.tr("Create waypoint here"), UiAction::LocateWaypoint);
@@ -574,9 +693,12 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
                 UiAction::CaveHeightDown, UiAction::CaveHeightUp);
         toggle("Coordinates", UiAction::Coordinates, s.showCoordinates);
         toggle("Show biome", UiAction::Biome, s.showBiome);
+        toggle("Biome regions", UiAction::BiomeRegions, s.showBiomeRegions);
+        toggle("Night and lighting", UiAction::Lighting, s.showLighting);
         toggle("Show scale", UiAction::Scale, s.showScale);
         toggle("Compass", UiAction::Compass, s.showCompass);
         toggle("Chunk borders", UiAction::ChunkBorders, s.showChunkBorders);
+        toggle("Slime chunks", UiAction::SlimeChunks, s.showSlimeChunks);
         toggle("Waypoints", UiAction::Waypoints, s.showWaypoints);
         toggle("Target guidance", UiAction::Navigation, s.showNavigation);
         toggle("Include water", UiAction::Water, s.includeWater);
@@ -599,6 +721,8 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
     panelHeight = std::min(panelHeight, contentTop + rowCount * rowStep + 40);
     frame.panel = {(width - panelWidth) / 2, (height - panelHeight) / 2, panelWidth, panelHeight};
     visibleRows = std::max(1, static_cast<int>((panelHeight - contentTop - 40) / rowStep));
+    // Keep a group name and its two map switches together when paging.
+    if (page == Page::Groups && visibleRows > 1) visibleRows -= visibleRows % 2;
     int pages = (rowCount + visibleRows - 1) / visibleRows;
     offset = std::clamp(offset, 0, std::max(0, rowCount - visibleRows));
     if (page == Page::Settings) {

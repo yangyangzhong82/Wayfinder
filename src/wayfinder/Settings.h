@@ -14,6 +14,7 @@ struct Settings {
     int         maxCachedChunks{8192};
     int         minimapPixels{128};
     int         fullscreenPixels{384};
+    int         terrainPixelScale{2}; // Raster density; Quality uses 4 without changing world coverage.
     int         refreshMilliseconds{100};
     int         autosaveSeconds{30};
     float       minimapSize{112.0f};
@@ -26,7 +27,11 @@ struct Settings {
     float       minimapOpacity{0.92f};
     float       minimapPositionX{1.0f}, minimapPositionY{0.0f};
     bool        showCoordinates{true}, showWaypoints{true}, showNavigation{true}, recordDeaths{true};
+    bool        recordTrail{true}, showTrail{true};
     bool        showScale{true}, showCompass{true}, showChunkBorders{false}, showBiome{true};
+    bool        showSlimeChunks{false};
+    bool        showBiomeRegions{false};
+    bool        showLighting{true};
     bool        showEntities{true}, entityFilterEnabled{false};
     bool        entityPortraits{true};
     float       minimapEntityScale{0.75f};

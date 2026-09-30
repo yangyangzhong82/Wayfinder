@@ -17,6 +17,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     maxCachedChunks,
     minimapPixels,
     fullscreenPixels,
+    terrainPixelScale,
     refreshMilliseconds,
     autosaveSeconds,
     minimapSize,
@@ -34,9 +35,14 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     showWaypoints,
     showNavigation,
     recordDeaths,
+    recordTrail,
+    showTrail,
     showScale,
     showCompass,
     showChunkBorders,
+    showSlimeChunks,
+    showBiomeRegions,
+    showLighting,
     showBiome,
     showEntities,
     entityPortraits,
@@ -55,7 +61,7 @@ bool bindableMapKey(int code) {
 bool bindableZoomKey(int code) { return bindableMapKey(code) || code == 187 || code == 189 || code == 107 || code == 109; }
 bool zoomMinimap(Settings& s, bool zoomIn) {
     auto before = s.minimapBlocksPerPixel;
-    s.minimapBlocksPerPixel = std::clamp(before * (zoomIn ? 0.8 : 1.25), 0.5, 16.0);
+    s.minimapBlocksPerPixel = std::clamp(before * (zoomIn ? 0.8 : 1.25), minMapBlocksPerPixel, 16.0);
     return before != s.minimapBlocksPerPixel;
 }
 void applyPerformancePreset(Settings& s, PerformancePreset preset) {
@@ -66,6 +72,7 @@ void applyPerformancePreset(Settings& s, PerformancePreset preset) {
     s.samplingBudgetMicros = light ? 750 : quality ? 2500 : 1500;
     s.minimapPixels = light ? 96 : quality ? 192 : 128;
     s.fullscreenPixels = light ? 256 : quality ? 512 : 384;
+    s.terrainPixelScale = quality ? 4 : 2;
     s.refreshMilliseconds = light ? 200 : quality ? 75 : 100;
 }
 PerformancePreset performancePreset(Settings const& s) {
@@ -74,7 +81,8 @@ PerformancePreset performancePreset(Settings const& s) {
         applyPerformancePreset(candidate, p);
         if (s.sampleRadiusChunks == candidate.sampleRadiusChunks && s.columnsPerTick == candidate.columnsPerTick
             && s.samplingBudgetMicros == candidate.samplingBudgetMicros && s.minimapPixels == candidate.minimapPixels
-            && s.fullscreenPixels == candidate.fullscreenPixels && s.refreshMilliseconds == candidate.refreshMilliseconds) return p;
+            && s.fullscreenPixels == candidate.fullscreenPixels && s.terrainPixelScale == candidate.terrainPixelScale
+            && s.refreshMilliseconds == candidate.refreshMilliseconds) return p;
     }
     return PerformancePreset::Custom;
 }
@@ -104,10 +112,11 @@ void normalizeSettings(Settings& s) {
     s.maxCachedChunks       = std::clamp(s.maxCachedChunks, 256, 65536);
     s.minimapPixels         = std::clamp(s.minimapPixels, 64, 256);
     s.fullscreenPixels      = std::clamp(s.fullscreenPixels, 128, 768);
+    s.terrainPixelScale     = std::clamp(s.terrainPixelScale, 2, 4);
     s.refreshMilliseconds   = std::clamp(s.refreshMilliseconds, 50, 1000);
     s.autosaveSeconds       = std::clamp(s.autosaveSeconds, 10, 600);
     s.minimapSize           = std::clamp(s.minimapSize, 64.0f, 256.0f);
-    s.minimapBlocksPerPixel = std::clamp(s.minimapBlocksPerPixel, 0.5, 16.0);
+    s.minimapBlocksPerPixel = std::clamp(s.minimapBlocksPerPixel, minMapBlocksPerPixel, 16.0);
     s.minimapOpacity        = std::clamp(s.minimapOpacity, 0.2f, 1.0f);
     s.minimapPositionX      = std::clamp(s.minimapPositionX, 0.0f, 1.0f);
     s.minimapPositionY      = std::clamp(s.minimapPositionY, 0.0f, 1.0f);
@@ -131,6 +140,12 @@ Settings loadSettings(std::filesystem::path const& directory) {
         std::ifstream in(path);
         auto json = nlohmann::json::parse(in);
         result = json.get<Settings>();
+        if (!json.contains("terrainPixelScale")) {
+            // Upgrade existing Quality configs; retain the old density for other presets/custom configs.
+            auto candidate = result;
+            candidate.terrainPixelScale = 4;
+            if (performancePreset(candidate) == PerformancePreset::Quality) result.terrainPixelScale = 4;
+        }
         // Pre-zoom configs may already use +/- for M/N. Pick free defaults only
         // for missing new fields; explicit conflicting bindings remain an error.
         auto defaultZoomKey = [&](int preferred, int other) {

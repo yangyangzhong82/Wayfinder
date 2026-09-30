@@ -3,6 +3,9 @@
 #include "wayfinder/Settings.h"
 
 namespace wayfinder {
+// Keep navigation/zoom in logical pixels; raster density is independent of world coverage.
+inline constexpr int terrainPixelScale = 2;
+MapView detailTextureView(MapView visible, int pixelScale = terrainPixelScale);
 // Raster data stays on a stable texel grid; the visible minimap moves inside it.
 MapView minimapTextureView(MapView visible);
 bool textureCoversView(MapView const& texture, MapView const& visible, double marginPixels = 0);
@@ -14,6 +17,9 @@ struct WayfinderView {
     float guiWidth{}, guiHeight{};
     MapRect area;
     MapView fullView;
+    std::optional<MapLayer> lockedLayer;
+    MapLayer displayedLayer(MapLayer live) const { return fullscreen && lockedLayer ? *lockedLayer : live; }
+    void selectLayer(MapLayer layer) { lockedLayer = layer; following = false; }
 
     void follow(double playerX, double playerZ);
     void fit(std::optional<MapBounds> live, std::optional<MapBounds> history);

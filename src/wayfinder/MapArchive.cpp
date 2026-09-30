@@ -32,7 +32,7 @@ MapArchive::MapArchive(std::filesystem::path legacyPath, std::string identity, s
     if (progress) progress->phase.store(ArchiveLoadProgress::Phase::Reading);
     for (auto const& file : files) {
         try {
-            auto records = readMap(file, mIdentity, 2);
+            auto records = readMap(file, mIdentity, 2, &mMaterials);
             if (records.size() != 1 || file.filename() != tilePath(records.front().key).filename())
                 throw std::runtime_error("Invalid history tile");
             index(records.front().key, records.front().tile);
@@ -47,7 +47,7 @@ MapArchive::MapArchive(std::filesystem::path legacyPath, std::string identity, s
         if (progress) progress->phase.store(ArchiveLoadProgress::Phase::Migrating);
         std::vector<TileRecord> legacy;
         try {
-            legacy = readMap(legacyPath, mIdentity, 65536);
+            legacy = readMap(legacyPath, mIdentity, 65536, &mMaterials);
         } catch (std::exception const& ex) {
             // Keep a bad legacy snapshot in place; valid per-tile history remains usable.
             mWarnings.push_back("Legacy snapshot preserved: " + legacyPath.string() + ": " + ex.what());
@@ -88,10 +88,14 @@ void MapArchive::rebuildBounds() {
     }
 }
 void MapArchive::index(TileKey key, MapTile const& tile) {
-    Entry entry{tileOverview(tile), {}, tile.lastTouched};
+    Entry entry{tileOverview(tile), {}, tile.lastTouched, tile.biomes.overview(), {}};
+    TerrainNeighborhood heights(tile);
     bool  first = true;
     for (int i = 0; i < 256; ++i) {
         if (!tile.cells[i].known()) continue;
+        auto cell = tile.cells[i];
+        auto color = shadePixel(cell.color, terrainShadeAt(cell, heights, i % 16, i / 16));
+        for (int dark = 0; dark < 16; ++dark) entry.lighting[dark].add(litColor(color, cell, {true, dark}));
         double x = key.x * 16.0 + i % 16, z = key.z * 16.0 + i / 16;
         if (first) {
             entry.bounds = {x, z, x + 1, z + 1};
@@ -143,7 +147,7 @@ MapArchive::Resident& MapArchive::load(TileKey key) {
     MapTile tile;
     if (mIndex.contains(key)) {
         try {
-            auto records = readMap(tilePath(key), mIdentity, 2);
+            auto records = readMap(tilePath(key), mIdentity, 2, &mMaterials);
             if (records.size() != 1 || records.front().key != key)
                 throw std::runtime_error("Missing or invalid history tile");
             tile = records.front().tile;
@@ -160,11 +164,16 @@ void MapArchive::update(std::vector<TileRecord> const& records) {
         auto& resident = load(record.key);
         // A newly sampled tile can be partial after RAM eviction. Merge only known
         // cells so that it cannot erase the rest of the archived chunk.
-        for (int i = 0; i < 256; ++i)
-            if (record.tile.cells[i].known() && resident.tile.cells[i] != record.tile.cells[i]) {
-                resident.tile.cells[i] = record.tile.cells[i];
+        for (int i = 0; i < 256; ++i) {
+            auto incoming = record.tile.cells[i];
+            retainPendingMaterial(incoming, resident.tile.cells[i]);
+            if (incoming.known() && resident.tile.cells[i] != incoming) {
+                resident.tile.cells[i] = std::move(incoming);
                 resident.dirty         = true;
             }
+            if (record.tile.cells[i].known() && resident.tile.biomes.set(i, record.tile.biomes.get(i)))
+                resident.dirty = true;
+        }
         if (record.tile.lastTouched > resident.tile.lastTouched) {
             resident.tile.lastTouched = record.tile.lastTouched;
             resident.dirty            = true;
@@ -190,8 +199,25 @@ MapCell MapArchive::get(MapLayer layer, int x, int z) {
     return load(key).tile.cells[localBlock(z) * 16 + localBlock(x)];
 }
 
-std::vector<std::uint32_t> MapArchive::rasterize(MapLayer layer, MapView const& view) {
-    MapRaster raster(view);
+std::string MapArchive::biome(MapLayer layer, int x, int z) {
+    TileKey key{layer.dimension, floorDiv(x, 16), floorDiv(z, 16), layer.slice};
+    if (!mIndex.contains(key)) return {};
+    return std::string(load(key).tile.biomes.get(localBlock(z) * 16 + localBlock(x)));
+}
+BiomeMap MapArchive::biomes(MapLayer layer, MapView const& view) {
+    BiomeRaster raster(view);
+    std::vector<TileKey> visible;
+    for (auto const& [key, entry] : mIndex)
+        if (key.layer() == layer && raster.intersects(key)) {
+            if (raster.coarse()) raster.uniform(key, entry.biome);
+            else visible.push_back(key);
+        }
+    for (auto key : visible) if (mIndex.contains(key)) raster.tile(key, load(key).tile.biomes);
+    return raster.finish();
+}
+
+std::vector<std::uint32_t> MapArchive::rasterize(MapLayer layer, MapView const& view, MapLighting lighting) {
+    MapRaster raster(view, lighting);
     // Loading can isolate a tile (including a north neighbour), invalidating index entries.
     std::vector<TileKey> visible;
     for (auto const& [key, entry] : mIndex) {
@@ -201,21 +227,19 @@ std::vector<std::uint32_t> MapArchive::rasterize(MapLayer layer, MapView const& 
     for (auto key : visible) {
         auto found = mIndex.find(key);
         if (found == mIndex.end()) continue;
-        if (view.blocksPerPixel >= 32) raster.add(key.x * 16.0, key.z * 16.0, 16, found->second.overview);
+        if (view.blocksPerPixel >= 32) raster.add(key.x * 16.0, key.z * 16.0, 16,
+            lighting.enabled ? found->second.lighting[std::clamp(lighting.skyDarken, 0, 15)] : found->second.overview);
         else {
-            // Copy both edges before loading another tile: capacity may be one.
-            std::array<MapCell, 16> north{}, west{};
-            TileKey                 above{layer.dimension, key.x, key.z - 1, layer.slice};
-            if (mIndex.contains(above)) {
-                auto const& tile = load(above).tile;
-                std::copy(tile.cells.begin() + 240, tile.cells.end(), north.begin());
+            // Own the center snapshot before any neighbour load: capacity can
+            // be one. The halo copies heights only, never engine/material data.
+            auto tile = load(key).tile;
+            TerrainNeighborhood heights(tile);
+            for (int direction = 0; direction < 4; ++direction) {
+                auto offset = TerrainNeighborhood::directions[direction];
+                TileKey neighbor{key.dimension, key.x + offset[0], key.z + offset[1], key.slice};
+                if (mIndex.contains(neighbor)) heights.edge(direction, load(neighbor).tile);
             }
-            TileKey left{layer.dimension, key.x - 1, key.z, layer.slice};
-            if (mIndex.contains(left)) {
-                auto const& tile = load(left).tile;
-                for (int z = 0; z < 16; ++z) west[z] = tile.cells[z * 16 + 15];
-            }
-            raster.tile(key, load(key).tile, [&](int x) { return north[x]; }, [&](int z) { return west[z]; });
+            raster.tile(key, tile, heights);
         }
     }
     return raster.finish();

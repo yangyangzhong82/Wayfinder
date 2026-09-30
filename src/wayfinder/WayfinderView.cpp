@@ -1,6 +1,14 @@
 #include "wayfinder/WayfinderView.h"
 
 namespace wayfinder {
+MapView detailTextureView(MapView visible, int pixelScale) {
+    pixelScale = std::clamp(pixelScale, 2, 4);
+    visible.width *= pixelScale;
+    visible.height *= pixelScale;
+    visible.blocksPerPixel /= pixelScale;
+    return visible;
+}
+
 MapView minimapTextureView(MapView visible) {
     // Leave room for motion between async updates, plus a texel for filtering.
     constexpr int border = 8;
@@ -12,22 +20,25 @@ MapView minimapTextureView(MapView visible) {
 }
 
 bool textureCoversView(MapView const& texture, MapView const& visible, double marginPixels) {
-    if (texture.blocksPerPixel != visible.blocksPerPixel || texture.blocksPerPixel <= 0) return false;
-    double roomX = (texture.width - visible.width) * 0.5 - marginPixels;
-    double roomZ = (texture.height - visible.height) * 0.5 - marginPixels;
+    if (texture.blocksPerPixel <= 0 || visible.blocksPerPixel <= 0) return false;
+    double ratio = visible.blocksPerPixel / texture.blocksPerPixel;
+    double roomX = (texture.width - visible.width * ratio) * 0.5 - marginPixels;
+    double roomZ = (texture.height - visible.height * ratio) * 0.5 - marginPixels;
     return std::abs(visible.centerX - texture.centerX) / texture.blocksPerPixel <= roomX
         && std::abs(visible.centerZ - texture.centerZ) / texture.blocksPerPixel <= roomZ;
 }
 
 MapRect textureUvRect(MapView const& texture, MapView const& visible) {
     // Difference first preserves sub-block precision near the world boundary.
-    double x = (visible.centerX - texture.centerX) / texture.blocksPerPixel + (texture.width - visible.width) * 0.5;
-    double z = (visible.centerZ - texture.centerZ) / texture.blocksPerPixel + (texture.height - visible.height) * 0.5;
+    double ratio = visible.blocksPerPixel / texture.blocksPerPixel;
+    double x = (visible.centerX - texture.centerX) / texture.blocksPerPixel + (texture.width - visible.width * ratio) * 0.5;
+    double z = (visible.centerZ - texture.centerZ) / texture.blocksPerPixel + (texture.height - visible.height * ratio) * 0.5;
     return {static_cast<float>(x / texture.width), static_cast<float>(z / texture.height),
-            static_cast<float>(visible.width) / texture.width, static_cast<float>(visible.height) / texture.height};
+            static_cast<float>(visible.width * ratio / texture.width), static_cast<float>(visible.height * ratio / texture.height)};
 }
 
 void WayfinderView::follow(double playerX, double playerZ) {
+    lockedLayer.reset();
     following = true;
     fullView.centerX = playerX;
     fullView.centerZ = playerZ;
@@ -48,7 +59,7 @@ void WayfinderView::fit(std::optional<MapBounds> bounds, std::optional<MapBounds
     fullView.centerZ = (bounds->minZ + bounds->maxZ) * 0.5;
     fullView.blocksPerPixel = std::clamp(
         1.1 * std::max((bounds->maxX - bounds->minX) / fullView.width, (bounds->maxZ - bounds->minZ) / fullView.height),
-        0.5, 128.0);
+        minMapBlocksPerPixel, 128.0);
     following = false;
 }
 

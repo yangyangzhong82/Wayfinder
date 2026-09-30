@@ -20,6 +20,10 @@ struct ColumnBlock {
     ColumnKind    kind{ColumnKind::Air};
     std::uint32_t color{};
     bool          waterlogged{};
+    TerrainMaterialPtr material{};
+    std::uint32_t tint{0xffffffffu};
+    std::uint8_t rotation{};
+    std::uint64_t surfaceId{};
 };
 inline MapCell emptyTerrain(int y, bool wall) {
     return {
@@ -46,10 +50,29 @@ std::optional<MapCell> columnFloor(int top, int minY, Read&& read) {
         }
         if (water) return water;
         if (block->kind == ColumnKind::Air) continue;
-        return MapCell{block->color, static_cast<std::int16_t>(y)};
+        return MapCell{block->color, static_cast<std::int16_t>(y), 0, 0, 255, 255,
+            block->material, block->tint, block->rotation, block->surfaceId};
     }
     if (water) return water;
     return y < minY ? std::optional<MapCell>(emptyTerrain(minY, false)) : std::nullopt;
+}
+// The engine's solid-height hint can be the bottom of a lava pool. Resolve any
+// liquid directly above it before scanning down, without looking through roofs
+// or treating an unavailable liquid surface as the solid floor underneath.
+template <class Read>
+std::optional<MapCell> surfaceColumn(int solidTop, int minY, int maxY, Read&& read) {
+    if (minY >= maxY || solidTop < minY - 1 || solidTop >= maxY) return {};
+    int top = solidTop;
+    while (top + 1 < maxY) {
+        auto above = read(top + 1);
+        if (!above) return {};
+        if (above->kind != ColumnKind::Water && above->kind != ColumnKind::Lava) break;
+        if (top - solidTop >= 64) return {};
+        ++top;
+        // A waterlogged solid is itself a visible surface, not a passage upward.
+        if (above->waterlogged) break;
+    }
+    return columnFloor(top, minY, read);
 }
 template <class Read>
 std::optional<MapCell> caveColumn(int referenceY, int minY, int maxY, Read&& read) {

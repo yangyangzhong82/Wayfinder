@@ -1,5 +1,6 @@
 #pragma once
 #include "wayfinder/MapStorage.h"
+#include "wayfinder/BiomeOverlay.h"
 #include <atomic>
 #include <memory>
 
@@ -19,7 +20,9 @@ public:
     void                               flush();
     std::vector<TileRecord>            recent(std::size_t count);
     MapCell                            get(MapLayer layer, int x, int z);
-    std::vector<std::uint32_t>         rasterize(MapLayer layer, MapView const& view);
+    std::string                        biome(MapLayer layer, int x, int z);
+    BiomeMap                           biomes(MapLayer layer, MapView const& view);
+    std::vector<std::uint32_t>         rasterize(MapLayer layer, MapView const& view, MapLighting lighting = {});
     std::unordered_map<MapLayer, MapBounds, MapLayerHash> bounds() const;
     std::size_t                        size() const { return mIndex.size(); }
     std::size_t                        rejectedTiles() const { return mRejected; }
@@ -30,6 +33,8 @@ private:
         ColorAggregate overview;
         MapBounds      bounds;
         std::uint64_t  touched{};
+        std::string    biome;
+        std::array<ColorAggregate, 16> lighting;
     };
     struct Resident {
         MapTile       tile;
@@ -52,5 +57,6 @@ private:
     std::unordered_set<std::string>                    mBlockedFiles;
     std::vector<std::string>                           mWarnings;
     std::size_t                                       mRejected{};
+    TerrainMaterialPool                               mMaterials;
 };
 } // namespace wayfinder
