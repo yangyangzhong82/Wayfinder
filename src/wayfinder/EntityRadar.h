@@ -1,6 +1,7 @@
 #pragma once
 #include "wayfinder/Locale.h"
 #include "wayfinder/EntityPortraits.h"
+#include "wayfinder/EntityAppearance.h"
 #include "wayfinder/MapUi.h"
 #include "wayfinder/Settings.h"
 #include <span>
@@ -104,6 +105,7 @@ struct EntityMarker {
     double x{}, y{}, z{};
     std::string type, name;
     bool player{};
+    EntityDisposition disposition{EntityDisposition::Neutral};
 };
 inline bool entityPriority(EntityMarker const& a, EntityMarker const& b, double x, double y, double z) {
     if (a.player != b.player) return a.player;
@@ -141,9 +143,14 @@ struct PlacedEntity {
     bool below{};
     float anchorX{}, anchorY{}; // Actual projected position; x/y may move slightly to avoid overlap.
     int count{1};
+    EntityDisposition disposition{EntityDisposition::Neutral};
+    bool fullscreen{};
 };
+inline bool entityPortraitsEnabled(Settings const& settings, bool fullscreen) {
+    return fullscreen ? settings.entityPortraits : !settings.minimapEntityCircles;
+}
 inline float entityIconSize(PlacedEntity const& marker, Settings const& settings) {
-    return (settings.entityPortraits && entityPortrait(marker.type) ? entityPortraitSize + 2 : 6) * marker.iconScale;
+    return (entityPortraitsEnabled(settings, marker.fullscreen) && entityPortrait(marker.type) ? entityPortraitSize + 2 : 6) * marker.iconScale;
 }
 inline MapRect entityCountBounds(PlacedEntity const& marker, Settings const& settings) {
     if (marker.count < 2) return {};
@@ -169,12 +176,13 @@ inline std::vector<PlacedEntity> layoutEntities(
     if (!settings.showEntities || area.width < 8 || area.height < 8 || view.width <= 0 || view.height <= 0
         || view.blocksPerPixel <= 0) return result;
     auto origin = view.worldAt(0, 0);
-    // World-anchored screen-sized cells stay stable while panning. Never combine
-    // different species, height groups or players into one misleading portrait.
-    using ClusterKey = std::tuple<double, double, std::string, bool>;
+    // Only portrait mode clusters. Circle mode keeps one marker per creature.
+    // World-anchored cells never combine different species, relationships, height groups or players.
+    using ClusterKey = std::tuple<double, double, std::string, bool, EntityDisposition>;
     std::map<ClusterKey, std::size_t> clusters;
     float scale = fullscreen ? 1.0f : settings.minimapEntityScale;
-    float cellPixels = std::max(8.0f, (settings.entityPortraits ? entityPortraitSize + 2 : 6) * scale + 2);
+    bool usePortraits = entityPortraitsEnabled(settings, fullscreen);
+    float cellPixels = std::max(8.0f, (usePortraits ? entityPortraitSize + 2 : 6) * scale + 2);
     double cellX = cellPixels * view.width * view.blocksPerPixel / area.width;
     double cellZ = cellPixels * view.height * view.blocksPerPixel / area.height;
     for (auto const& entity : entities) {
@@ -185,9 +193,9 @@ inline std::vector<PlacedEntity> layoutEntities(
         // Off-screen entities are not pinned to the edge like navigation targets.
         if (!area.contains(x, y)) continue;
         bool below = playerY - entity.y >= settings.entityDepthThreshold;
-        if (!entity.player) {
+        if (usePortraits && !entity.player) {
             auto [cluster, inserted] = clusters.try_emplace(
-                ClusterKey{std::floor(entity.x / cellX), std::floor(entity.z / cellZ), entity.type, below}, result.size());
+                ClusterKey{std::floor(entity.x / cellX), std::floor(entity.z / cellZ), entity.type, below, entity.disposition}, result.size());
             if (!inserted) {
                 auto& marker = result[cluster->second];
                 ++marker.count;
@@ -200,6 +208,8 @@ inline std::vector<PlacedEntity> layoutEntities(
         result.push_back({x, y, entity.player, entity.player
             ? (entity.name.empty() ? entityTypeLabel("minecraft:player", locale) : entity.name) : "", {}, 0.6f, entity.type});
         auto& marker = result.back();
+        marker.disposition = entity.disposition;
+        marker.fullscreen = fullscreen;
         marker.iconScale = scale;
         marker.below = below;
         marker.opacity = marker.below ? settings.undergroundEntityOpacity : 1.0f;
@@ -216,7 +226,7 @@ inline std::vector<PlacedEntity> layoutEntities(
         auto priority = [&](auto const& m) {
             return std::tuple{!m.player, m.below, m.count,
                 (m.anchorX-selfX)*(m.anchorX-selfX) + (m.anchorY-selfY)*(m.anchorY-selfY),
-                std::string_view(m.type), m.anchorX, m.anchorY, std::string_view(m.name)};
+                std::string_view(m.type), m.disposition, m.anchorX, m.anchorY, std::string_view(m.name)};
         };
         return priority(lhs) < priority(rhs);
     });
@@ -234,7 +244,9 @@ inline std::vector<PlacedEntity> layoutEntities(
                 && box.y + box.height <= area.y + area.height
                 && std::none_of(occupied.begin(), occupied.end(), [&](auto const& other) { return box.intersects(other); });
         };
-        if (!fits(original)) {
+        // Circles stay at the exact projection, including overlaps and clipped map edges.
+        // Their occupied bounds still guide player-name placement below.
+        if (usePortraits && !fits(original)) {
             float step = std::max(4.0f, entityIconSize(marker, settings) + 2);
             // Bounded fan-out keeps icons near the real position. Prefer the
             // smallest displacement; unchanged input produces unchanged placement.

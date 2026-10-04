@@ -161,7 +161,8 @@ void Wayfinder::Impl::Session::tick(Impl& app, ll::event::ClientLevelTickEvent& 
     if (navigationDirty && Clock::now() - lastNavigationAttempt >= std::chrono::seconds(5)) persistNavigation(app);
     persistTrail(app, false);
     if (!source) { trail.stopRetrace(); return; }
-    if (!foreground()) {
+    // Text editing owns an embedded native control while the map is open.
+    if (!foreground() && !app.ui.textInput.active()) {
         trail.stopRetrace();
         app.input.closeMap(app, false);
         app.input.heldKeys.clear();
@@ -169,7 +170,7 @@ void Wayfinder::Impl::Session::tick(Impl& app, ll::event::ClientLevelTickEvent& 
         app.input.consumedMouse.clear();
         return;
     }
-    if (app.view.fullscreen && !hud(*client)) app.input.closeMap(app, false);
+    if (app.view.fullscreen && !app.ui.textInput.active() && !hud(*client)) app.input.closeMap(app, false);
     auto const& pos = localPlayer->getPosition();
     if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z) || std::abs(pos.x) > 29999000 ||
         std::abs(pos.z) > 29999000 || pos.y < -32768 || pos.y > 32767)

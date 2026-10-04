@@ -36,16 +36,20 @@ void settingsTests(TestDirectory const& dir) {
         rejects([&] { entityTypeId(bad); }, "Malformed identifiers are rejected");
     Settings s;
     require(s.entityPortraits, "Portraits default on");
+    require(s.minimapEntityCircles && !entityPortraitsEnabled(s, false) && entityPortraitsEnabled(s, true),
+            "Everyday minimap defaults to circles while full map retains portraits");
     require(s.minimapEntityScale == 0.75f && s.undergroundEntityOpacity == 0.35f && s.entityDepthThreshold == 4,
             "Smaller minimap icons and height fading have compatible defaults");
     require(s.showEntities && !s.entityFilterEnabled && s.entityRadius == 64, "Default radar shows all nearby types");
     s.showEntities = false; s.entityFilterEnabled = true; s.entityRadius = 96;
     s.entityPortraits = false;
+    s.minimapEntityCircles = false;
     s.minimapEntityScale = 1.25f; s.undergroundEntityOpacity = 0.6f; s.entityDepthThreshold = 8;
     s.entityTypes = {"Zombie", "minecraft:zombie", "PLAYER", "addon:guard"};
     saveSettings(dir.path, s);
     auto loaded = loadSettings(dir.path);
     require(!loaded.entityPortraits, "Portrait preference persists");
+    require(!loaded.minimapEntityCircles && entityPortraitsEnabled(loaded, false), "Minimap style persists independently");
     require(loaded.minimapEntityScale == 1.25f && loaded.undergroundEntityOpacity == 0.6f && loaded.entityDepthThreshold == 8,
             "Icon size, lower opacity and relative height threshold persist");
     require(!loaded.showEntities && loaded.entityFilterEnabled && loaded.entityRadius == 96, "Radar toggles and radius persist");
@@ -59,11 +63,12 @@ void settingsTests(TestDirectory const& dir) {
     require(loaded.entityFilterEnabled && !allowedEntityType(loaded, "minecraft:player"),
             "An enabled empty selection remains empty after reload");
     auto json = nlohmann::json::parse(std::ifstream(dir.path / "config.json"));
-    for (auto field : {"showEntities", "entityPortraits", "entityFilterEnabled", "entityRadius", "entityTypes",
+    for (auto field : {"showEntities", "entityPortraits", "minimapEntityCircles", "entityFilterEnabled", "entityRadius", "entityTypes",
         "minimapEntityScale", "undergroundEntityOpacity", "entityDepthThreshold"}) json.erase(field);
     atomicText(dir.path / "config.json", json.dump());
     loaded = loadSettings(dir.path);
     require(loaded.entityPortraits, "Old configurations enable portraits by default");
+    require(loaded.minimapEntityCircles, "Old configurations receive the new minimap circle default");
     require(loaded.minimapEntityScale == 0.75f && loaded.undergroundEntityOpacity == 0.35f && loaded.entityDepthThreshold == 4,
             "Old configurations receive scale and fading defaults");
     require(loaded.showEntities && !loaded.entityFilterEnabled && loaded.entityRadius == 64 && loaded.entityTypes.empty(),
@@ -90,9 +95,11 @@ void settingsTests(TestDirectory const& dir) {
     s.entityTypes.assign(257, "minecraft:player");
     rejects([&] { normalizeSettings(s); }, "Entity selection size is bounded");
     s = loaded; s.showEntities = false; s.entityPortraits = false; s.entityFilterEnabled = true; s.entityTypes = {"minecraft:player"};
+    s.minimapEntityCircles = false;
     s.minimapEntityScale = 2; s.undergroundEntityOpacity = 1; s.entityDepthThreshold = 64;
     resetMapPreferences(s);
     require(s.entityPortraits, "Reset restores portraits");
+    require(s.minimapEntityCircles, "Reset restores minimap circles");
     require(s.minimapEntityScale == 0.75f && s.undergroundEntityOpacity == 0.35f && s.entityDepthThreshold == 4,
             "Reset restores scale and height fading defaults");
     require(s.showEntities && !s.entityFilterEnabled && s.entityTypes.empty() && s.entityRadius == 64,
@@ -109,6 +116,12 @@ void menuTests() {
             "Entity settings open without modifying stored settings");
     menu.loadedEntities = 17; menu.nearbyEntities = 9; menu.visibleEntities = 3;
     frame = menu.build(420, 280, s, nav);
+    require(std::any_of(frame.buttons.begin(), frame.buttons.end(), [](auto const& button) {
+        return button.action == UiAction::MinimapEntityCircles && button.value == "Colored circles";
+    }), "Minimap display style is visible on the first settings page");
+    require(menu.action(action(UiAction::MinimapEntityCircles), s, nav) == 2
+        && !s.minimapEntityCircles && s.entityPortraits, "Minimap style switch saves without changing full map style");
+    menu.action(action(UiAction::MinimapEntityCircles), s, nav);
     require(frame.message == "Entities loaded: 17 | Nearby: 9 | Matched: 3",
             "Entity settings expose collection and filter counts for live diagnosis");
     require(menu.action(action(UiAction::ShowEntities), s, nav) == 2 && !s.showEntities, "Master switch requests a save");
@@ -296,13 +309,13 @@ void portraitTests() {
     auto const& creeper = entityPortrait("minecraft:creeper")->parts.front();
     require(creeper.u == 0.125f && creeper.v == 0.25f && creeper.uw == 0.125f && creeper.vh == 0.25f,
             "Creeper profile selects the face rather than its body or entire texture");
-    Settings s; s.minimapEntityScale = 1; Locale locale;
+    Settings s; s.minimapEntityScale = 1; s.minimapEntityCircles = false; Locale locale;
     std::vector<EntityMarker> nearby{{0,0,64,0,"minecraft:player","Alex",true},
         {0,8,64,0,"minecraft:zombie",{},false}};
     auto withPortraits = layoutEntities(nearby, {0,0,1,128,128}, {0,0,128,128}, 0, 0,64,0,s,locale);
     require(withPortraits.size() == 2 && !withPortraits[0].label.intersects(entityVisualBounds(withPortraits[1], s)),
             "Player names avoid the larger neighboring portrait bounds");
-    s.entityPortraits = false;
+    s.minimapEntityCircles = true;
     auto dots = layoutEntities(nearby, {0,0,1,128,128}, {0,0,128,128}, 0, 0,64,0,s,locale);
     require(dots.size() == withPortraits.size() && dots[0].name == "Alex" && dots[1].anchorX == withPortraits[1].anchorX,
             "Disabling portraits preserves entities, names and geographic positions");
@@ -372,6 +385,7 @@ void livingEntityTests() {
 }
 std::vector<PlacedEntity> crowdTests() {
     Settings s; Locale locale;
+    s.minimapEntityCircles = false; // Keep the original portrait-sized clustering regression.
     MapView view{0,0,1,128,128}; MapRect area{0,0,128,128};
     std::vector<EntityMarker> mixed;
     for (int i = 0; i < 20; ++i) mixed.push_back({0,2,64,2,"minecraft:skeleton",{},false});
@@ -423,6 +437,14 @@ std::vector<PlacedEntity> crowdTests() {
     mixed.assign(512, {0,2,64,2,"minecraft:skeleton",{},false});
     auto crowded = project();
     require(crowded.size() == 1 && crowded[0].count == 512, "Dense same-species farms need only one portrait submission");
+    s.minimapEntityCircles = true;
+    crowded = project();
+    require(crowded.size() == mixed.size() && std::all_of(crowded.begin(), crowded.end(), [&](auto const& marker) {
+        auto badge = entityCountBounds(marker, s);
+        return marker.count == 1 && badge.width == 0 && badge.height == 0
+            && marker.x == 66 && marker.y == 66 && marker.x == marker.anchorX && marker.y == marker.anchorY;
+    }), "Dense circle markers remain at their actual position without count badges or fan-out");
+    s.minimapEntityCircles = false;
     mixed = {{0,-63,64,-63,"minecraft:cow",{},false}, {0,-62,64,-62,"minecraft:cow",{},false},
         {0,-63,64,-63,"minecraft:zombie",{},false}};
     for (auto const& marker : project()) {
@@ -430,7 +452,85 @@ std::vector<PlacedEntity> crowdTests() {
         require(box.x >= 0 && box.y >= 0 && box.x+box.width <= 128 && box.y+box.height <= 128,
                 "Edge clusters retain their complete count badges");
     }
+    s.minimapEntityCircles = true; s.entityPortraits = false; s.entityRadius = 128;
+    mixed.push_back({0,0,64,0,"minecraft:cow",{},false});
+    mixed.push_back({0,0,64,0,"minecraft:player","Alex",true});
+    for (bool full : {false, true}) {
+        auto exact = layoutEntities(mixed,view,area,0,0,64,0,s,locale,full);
+        require(exact.size() == mixed.size(), "Both circle modes preserve edge creatures and overlapping players");
+        for (std::size_t i = 0; i < exact.size(); ++i)
+            require(exact[i].x == 64 + mixed[i].x && exact[i].y == 64 + mixed[i].z,
+                    "Circle positions do not shift away from the player, other creatures or map edges");
+        require(exact.back().label.width > 0, "Player names remain visible with stationary circles");
+    }
     return markers;
+}
+void relationshipTests() {
+    using D = EntityDisposition;
+    require(entityDisposition("minecraft:wolf", true, true) == D::Tamed,
+            "A tamed wolf retains its pet color even while defending its owner");
+    require(entityDisposition("minecraft:horse", true) == D::Tamed, "Tamed mounts are recognized by state");
+    for (auto type : {"minecraft:cow", "minecraft:villager_v2", "minecraft:allay"})
+        require(entityDisposition(type) == D::Friendly, "Passive vanilla species are friendly without category hints");
+    for (auto type : {"minecraft:wolf", "minecraft:bee", "minecraft:enderman", "minecraft:piglin", "minecraft:iron_golem"}) {
+        require(entityDisposition(type, false, false, true) == D::Neutral, "Neutral species override the broad monster category");
+        require(entityDisposition(type, false, true) == D::Hostile, "Synced anger promotes neutral creatures to hostile");
+    }
+    for (auto type : {"minecraft:zombie", "minecraft:creeper", "minecraft:warden", "minecraft:elder_guardian"})
+        require(entityDisposition(type) == D::Hostile, "Hostile vanilla species do not depend on client category bits");
+    for (auto type : {"minecraft:ender_dragon", "minecraft:wither"})
+        require(entityDisposition(type, false, true, true) == D::Boss, "Boss color takes precedence over aggression");
+    require(entityDisposition("addon:guard") == D::Neutral
+        && entityDisposition("addon:guard", false, false, true) == D::Hostile
+        && entityDisposition("addon:guard", false, false, false, true) == D::Friendly
+        && entityDisposition("addon:guard", true) == D::Tamed, "Add-on mobs use synchronized state and category fallback");
+
+    Settings settings; Locale locale;
+    std::vector<EntityMarker> entities;
+    for (auto disposition : {D::Tamed, D::Neutral, D::Hostile, D::Tamed})
+        entities.push_back({0, 12, 64, 12, "minecraft:wolf", {}, false, disposition});
+    auto layout = [&](bool full) { return layoutEntities(entities, {0,0,1,128,128}, {0,0,128,128},
+        0, 0,64,0,settings,locale,full); };
+    for (bool full : {false, true}) {
+        auto markers = layout(full);
+        require(markers.size() == (full ? 3 : entities.size()),
+                "Circle mode keeps every wolf; portrait mode only combines matching relationships");
+        for (auto const& marker : markers) {
+            require(marker.count == (full && marker.disposition == D::Tamed ? 2 : 1),
+                    "Circles stay individual while portrait clusters preserve relationship and total counts");
+            require(entityIconSize(marker, settings) == (full ? entityPortraitSize + 2 : 6 * settings.minimapEntityScale),
+                "Layout reserves circle-sized bounds on minimap and portrait-sized bounds on full map");
+        }
+    }
+    auto circles = layout(false);
+    settings.minimapEntityCircles = false;
+    auto portraits = layout(false);
+    require(circles.size() == 4 && portraits.size() == 3 && entityIconSize(portraits[0], settings) > 6 * settings.minimapEntityScale
+        && portraits[0].anchorX == circles[0].anchorX, "Switching to portraits enables clustering while retaining world positions");
+    settings.entityPortraits = false;
+    auto fullCircles = layout(true);
+    require(fullCircles.size() == entities.size() && entityIconSize(fullCircles[0], settings) == 6
+        && entityPortraitsEnabled(settings, false) && std::all_of(fullCircles.begin(), fullCircles.end(), [](auto const& marker) {
+            return marker.count == 1;
+        }), "Full map circle mode also keeps individual creatures independently of minimap portraits");
+
+    auto pixels = EntityCircleAtlas::pixels();
+    std::set<std::uint32_t> uniqueColors;
+    for (int column = 0; column < EntityCircleAtlas::columns; ++column) {
+        uniqueColors.insert(EntityCircleAtlas::colors[column]);
+        auto pixel = [&](int x, int y) { return pixels[y * EntityCircleAtlas::width + column * EntityCircleAtlas::tileSize + x]; };
+        require((pixel(0, 0) >> 24) == 0 && (pixel(7, 7) >> 24) == 0,
+                "Circle atlas has transparent corners and center, without a square backdrop");
+        require((pixel(2, 7) >> 24) == 255 && (pixel(2, 7) & 0x00ffffff) == (EntityCircleAtlas::colors[column] & 0x00ffffff),
+                "Every ring contains an opaque band in its own relationship color");
+        for (int edge = 0; edge < 16; ++edge)
+            require((pixel(0,edge) >> 24) == 0 && (pixel(15,edge) >> 24) == 0
+                && (pixel(edge,0) >> 24) == 0 && (pixel(edge,15) >> 24) == 0,
+                "Transparent tile borders prevent color bleeding between adjacent circles");
+        for (int y = 0; y < 16; ++y) for (int x = 0; x < 16; ++x)
+            require(pixel(x,y) == pixel(15-x,y) && pixel(x,y) == pixel(x,15-y), "Ring silhouette is symmetric");
+    }
+    require(uniqueColors.size() == 6, "Five relationships and players have distinct colors");
 }
 void submissionTests() {
     // Model a UI batch that binds its last texture at flush. A mixed-species
@@ -459,13 +559,13 @@ void submissionTests() {
 int main(int argc, char** argv) {
     try {
         TestDirectory dir; settingsTests(dir); menuTests(); visibilityTests(); capacityTests(); portraitTests(); appearanceTests(); livingEntityTests();
-        auto preview = crowdTests(); submissionTests();
+        auto preview = crowdTests(); relationshipTests(); submissionTests();
         if (argc == 3 && std::string_view(argv[1]) == "--preview") {
             nlohmann::json document;
             for (auto const& m : preview) document["markers"].push_back({{"type",m.type},{"name",m.name},{"x",m.x},{"y",m.y},
                 {"anchorX",m.anchorX},{"anchorY",m.anchorY},{"count",m.count},{"scale",m.iconScale},{"opacity",m.opacity},
                 {"label",{m.label.x,m.label.y,m.label.width,m.label.height}}});
-            Settings s;
+            Settings s; s.minimapEntityCircles = false;
             for (auto const& m : preview) {
                 auto box = entityCountBounds(m,s);
                 document["badges"].push_back({box.x,box.y,box.width,box.height});

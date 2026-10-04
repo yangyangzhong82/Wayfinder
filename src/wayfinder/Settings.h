@@ -34,6 +34,7 @@ struct Settings {
     bool        showLighting{true};
     bool        showEntities{true}, entityFilterEnabled{false};
     bool        entityPortraits{true};
+    bool        minimapEntityCircles{true}; // Independent minimap style; full map keeps entityPortraits.
     float       minimapEntityScale{0.75f};
     float       undergroundEntityOpacity{0.35f}; // Lower entities: 65% transparent by default.
     int         entityDepthThreshold{4}; // Fade entities at least this many blocks below the player.

@@ -223,6 +223,9 @@ int MapMenu::action(UiButton const& b, Settings& s, Navigation& nav) {
     case UiAction::EntityPortraits:
         s.entityPortraits = !s.entityPortraits;
         break;
+    case UiAction::MinimapEntityCircles:
+        s.minimapEntityCircles = !s.minimapEntityCircles;
+        break;
     case UiAction::EntityScaleDown:
         s.minimapEntityScale -= 0.05f;
         break;
@@ -588,7 +591,8 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
             : retracing ? "Recording paused while retracing" : "Select a saved layer; Home returns to player.");
     } else if (page == Page::Entities) {
         toggle("Show nearby entities", UiAction::ShowEntities, s.showEntities);
-        toggle("Entity portraits", UiAction::EntityPortraits, s.entityPortraits);
+        setting("Minimap creatures", UiAction::MinimapEntityCircles, locale.tr(s.minimapEntityCircles ? "Colored circles" : "Portraits"));
+        setting("Full map creatures", UiAction::EntityPortraits, locale.tr(s.entityPortraits ? "Portraits" : "Colored circles"));
         stepper("Minimap entity scale", std::to_string(std::lround(s.minimapEntityScale * 100)) + "%",
             UiAction::EntityScaleDown, UiAction::EntityScaleUp);
         stepper("Lower entity transparency", std::to_string(std::lround((1 - s.undergroundEntityOpacity) * 100)) + "%",
@@ -599,6 +603,11 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         stepper("Entity radius", std::to_string(s.entityRadius) + locale.tr(" blocks"), UiAction::EntityRadiusDown, UiAction::EntityRadiusUp);
         pair(locale.tr("Players only"), UiAction::EntityPlayersOnly, locale.tr("Show all types"), UiAction::EntityAll);
         row(locale.tr("Clear entity selection"), UiAction::EntityNone);
+        setting("Tamed creatures", UiAction::None, locale.tr("Blue"));
+        setting("Friendly creatures", UiAction::None, locale.tr("Green"));
+        setting("Neutral creatures", UiAction::None, locale.tr("Yellow"));
+        setting("Hostile creatures", UiAction::None, locale.tr("Red"));
+        setting("Boss creatures", UiAction::None, locale.tr("Purple"));
         row(locale.tr("Search: ") + (focus == UiAction::EntitySearch ? "[" + text + "_]"
             : entitySearch.empty() ? locale.tr("All types") : entitySearch), UiAction::EntitySearch);
         auto choices = entityTypeChoices(observedEntityTypes, s);

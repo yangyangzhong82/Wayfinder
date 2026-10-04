@@ -173,6 +173,7 @@ void Wayfinder::Impl::Menu::openText(Impl& app) {
     request.accept = state.locale.tr("Done");
     request.cancel = state.locale.tr("Cancel");
     GetWindowRect(app.input.mapWindow, &request.anchor);
+    request.owner = app.input.mapWindow;
     try {
         textInput.start(std::move(request));
         nativeField = state.focus;

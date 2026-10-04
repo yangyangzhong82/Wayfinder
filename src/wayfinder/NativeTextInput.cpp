@@ -60,7 +60,9 @@ struct NativeTextInput::Impl {
     Request request;
     std::mutex mutex;
     HWND window{};
+    HWND edit{};
     bool cancelled{};
+    bool modeless{}, closing{};
     std::optional<Result> result;
     std::thread worker;
     // Accessed only by the UI thread.
@@ -71,9 +73,40 @@ struct NativeTextInput::Impl {
     explicit Impl(Request input) : request(std::move(input)), value(wide(request.text)) {}
     ~Impl() { cancel(); if (worker.joinable()) worker.join(); }
     void cancel() {
-        std::lock_guard lock(mutex);
-        cancelled = true;
-        if (window) PostMessageW(window, WM_CLOSE, 0, 0);
+        HWND target{};
+        bool isModeless{};
+        {
+            std::lock_guard lock(mutex);
+            cancelled = true;
+            isModeless = modeless;
+            target = isModeless ? edit : window;
+        }
+        if (target) {
+            if (isModeless) SendMessageW(target, WM_CLOSE, 0, 0);
+            else PostMessageW(target, WM_CLOSE, 0, 0);
+        }
+    }
+    void finishModeless(HWND control, bool accepted) {
+        if (!modeless || closing || control != edit) return;
+        closing = true;
+        Result next;
+        next.accepted = accepted;
+        try {
+            if (accepted) {
+                int length = GetWindowTextLengthW(control);
+                std::wstring text(static_cast<std::size_t>(length) + 1, L'\0');
+                text.resize(GetWindowTextW(control, text.data(), static_cast<int>(text.size())));
+                next.text = utf8(text);
+            }
+        } catch (std::exception const& ex) {
+            next.error = ex.what();
+            next.accepted = false;
+        }
+        {
+            std::lock_guard lock(mutex);
+            result = std::move(next);
+        }
+        DestroyWindow(control);
     }
     static LRESULT CALLBACK editProc(HWND edit, UINT msg, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR data) {
         auto& self = *reinterpret_cast<Impl*>(data);
@@ -81,11 +114,34 @@ struct NativeTextInput::Impl {
         if (msg == WM_IME_ENDCOMPOSITION) self.composing = false;
         if (msg == WM_GETDLGCODE && self.composing)
             return DefSubclassProc(edit, msg, w, l) | DLGC_WANTALLKEYS;
+        if (self.modeless && msg == WM_KEYDOWN && w == VK_RETURN) {
+            if (!self.composing) self.finishModeless(edit, true);
+            return 0;
+        }
+        if (self.modeless && msg == WM_KEYDOWN && w == VK_ESCAPE) {
+            self.finishModeless(edit, false);
+            return 0;
+        }
+        if (self.modeless && msg == WM_KEYDOWN && w == VK_TAB) {
+            self.finishModeless(edit, true);
+            return 0;
+        }
+        if (self.modeless && msg == WM_CLOSE) {
+            self.finishModeless(edit, false);
+            return 0;
+        }
+        if (self.modeless && msg == WM_KILLFOCUS && !self.closing) {
+            self.finishModeless(edit, false);
+            return 0;
+        }
         if (msg == WM_KEYDOWN && w == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
             SendMessageW(edit, EM_SETSEL, 0, -1);
             return 0;
         }
-        if (msg == WM_NCDESTROY) RemoveWindowSubclass(edit, editProc, id);
+        if (msg == WM_NCDESTROY) {
+            if (self.edit == edit) self.edit = nullptr;
+            RemoveWindowSubclass(edit, editProc, id);
+        }
         return DefSubclassProc(edit, msg, w, l);
     }
     static INT_PTR CALLBACK dialogProc(HWND dialog, UINT msg, WPARAM w, LPARAM l) {
@@ -174,13 +230,39 @@ struct NativeTextInput::Impl {
         if (cancelled) outcome.accepted = false;
         result = std::move(outcome);
     }
+    void startModeless() {
+        RECT client{};
+        if (!GetClientRect(request.owner, &client)) throw std::runtime_error("Unable to open text editor");
+        int width = std::clamp(client.right - client.left - 40, 220L, 420L);
+        int x = (client.right - client.left - width) / 2;
+        int y = (client.bottom - client.top - 24) / 2;
+        modeless = true;
+        edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", value.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, x, y, width, 24,
+            request.owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!edit) {
+            modeless = false;
+            throw std::runtime_error("Unable to open text editor");
+        }
+        SendMessageW(edit, EM_SETLIMITTEXT, 4096, 0);
+        if (!SetWindowSubclass(edit, editProc, 1, reinterpret_cast<DWORD_PTR>(this))) {
+            DestroyWindow(edit);
+            edit = nullptr;
+            modeless = false;
+            throw std::runtime_error("Unable to open text editor");
+        }
+        ImmAssociateContextEx(edit, nullptr, IACE_DEFAULT);
+        SetFocus(edit);
+        SendMessageW(edit, EM_SETSEL, 0, -1);
+    }
 };
 NativeTextInput::NativeTextInput() = default;
 NativeTextInput::~NativeTextInput() = default;
 void NativeTextInput::start(Request request) {
     if (mImpl) throw std::runtime_error("Text editor is already open");
     auto next = std::make_unique<Impl>(std::move(request));
-    next->worker = std::thread([self = next.get()] { self->run(); });
+    if (next->request.owner && IsWindow(next->request.owner)) next->startModeless();
+    else next->worker = std::thread([self = next.get()] { self->run(); });
     mImpl = std::move(next);
 }
 bool NativeTextInput::active() const { return bool(mImpl); }

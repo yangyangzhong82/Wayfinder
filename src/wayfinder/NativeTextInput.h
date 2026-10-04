@@ -12,6 +12,7 @@ public:
     struct Request {
         std::string title, text, hint, accept, cancel;
         RECT anchor{};
+        HWND owner{};
     };
     struct Result { bool accepted{}; std::string text, error; };
     NativeTextInput();

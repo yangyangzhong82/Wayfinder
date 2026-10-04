@@ -190,6 +190,13 @@ void Wayfinder::Impl::Input::mouse(Impl& app, ll::event::MouseInputEvent& event)
         if (data == 0 && consumedMouse.erase(button)) event.cancel();
         return;
     }
+    // Mouse messages generated while the embedded text editor is focused can
+    // still reach the game input hook. They belong to the editor and must not
+    // trigger the map's foreground-loss shutdown path.
+    if (app.ui.textInput.active()) {
+        event.cancel();
+        return;
+    }
     if (!app.session.client || !hud(*app.session.client) || !foreground()) {
         closeMap(app, false);
         return;

@@ -61,6 +61,11 @@ void Wayfinder::Impl::Session::sampleEntities(Impl& app) {
             auto name = static_cast<::Player const*>(actor)->getRealName();
             if (name.empty()) name = actor->getNameTag();
             try { marker.name = cleanName(name); } catch (std::exception const&) { marker.name.clear(); }
+        } else {
+            marker.disposition = entityDisposition(marker.type, actor->getStatusFlag(ActorFlags::Tamed),
+                actor->getStatusFlag(ActorFlags::Angry), actor->hasCategory(ActorCategory::Monster),
+                actor->hasCategory(ActorCategory::Animal) || actor->hasCategory(ActorCategory::Villager)
+                    || actor->hasCategory(ActorCategory::Ambient));
         }
         keepNearbyEntity(entities, std::move(marker), player.x, player.y, player.z);
     }

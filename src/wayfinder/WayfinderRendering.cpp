@@ -50,7 +50,9 @@ void Wayfinder::Impl::Rendering::render(Impl& app, ll::event::AfterUIRenderEvent
     }
     if (!app.session.client || app.session.client != &ci || !ci.getLocalPlayer()) return;
     app.ui.pollText(app);
-    if (app.view.fullscreen && (!foreground() || !hud(ci))) app.input.closeMap(app, false);
+    // Keep the map alive while its embedded text editor is completing.
+    if (app.view.fullscreen && !app.ui.textInput.active() && (!foreground() || !hud(ci)))
+        app.input.closeMap(app, false);
     if (failed || event.screenView().getScreenName() != "hud_screen" || !hud(ci)) return;
     if (!app.view.fullscreen && !app.settings.showMinimap) return;
     app.ui.refreshLocale(app.settings);

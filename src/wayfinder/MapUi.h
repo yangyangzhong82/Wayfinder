@@ -81,7 +81,7 @@ enum class UiAction {
     Performance,
     ResetSettings,
     Entities, ShowEntities, EntityFilterMode, EntityPlayersOnly, EntityAll, EntityNone,
-    EntityType, EntitySearch, EntityRadiusDown, EntityRadiusUp, EntityPortraits,
+    EntityType, EntitySearch, EntityRadiusDown, EntityRadiusUp, EntityPortraits, MinimapEntityCircles,
     EntityScaleDown, EntityScaleUp, EntityTransparencyDown, EntityTransparencyUp,
     EntityDepthDown, EntityDepthUp,
     Explore, LiveLayer, SelectLayer, RecordTrail, ShowTrail, Retrace, ClearTrail

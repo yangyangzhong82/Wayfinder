@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Default the minimap to colored creature circles: tamed blue, friendly green, neutral yellow, hostile red, and bosses purple. Add independent minimap/full-map style controls and a color legend; preserve full-map portrait preferences. Batch circles in a shared tiny atlas and show every creature at its actual map position, without numeric clustering, displacement, leader lines or anchor squares on either map. Keep portrait clustering, with different relationships in separate clusters.
 - Preserve continuous stair/ramp trails across cave slices and surface transitions; retrace across layers with up/down guidance. Save v2 trails while preserving legacy v1 breaks.
 - Add per-world waypoint group visibility for each map, favorite-first sorting, and multi-select batch regrouping. Keep navigation targets visible and hidden markers out of hit testing.
 - Use a native Windows Unicode editor with IME composition, cursor selection and copy/cut/paste. Accept X/Z or X/Y/Z coordinate tuples transactionally and preserve explicit heights when creating located waypoints.

@@ -47,9 +47,11 @@ void label(MinecraftUIRenderContext& ctx, float x, float y, float width, std::st
 struct MapRenderer::Impl {
     ResourceLocation                   location{Core::PathView("wayfinder/runtime/map"), ResourceFileSystem::Raw};
     ResourceLocation                   markerLocation{Core::PathView("wayfinder/runtime/markers"), ResourceFileSystem::Raw};
+    ResourceLocation                   circleLocation{Core::PathView("wayfinder/runtime/entity_circles"), ResourceFileSystem::Raw};
     std::shared_ptr<mce::TextureGroup> group;
     std::unique_ptr<mce::TexturePtr>   texture;
     std::unique_ptr<mce::TexturePtr>   markerTexture;
+    std::unique_ptr<mce::TexturePtr>   circleTexture;
     std::uint64_t                      revision = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t                      trailRevision{};
     bool                               trailVisible{};
@@ -138,6 +140,19 @@ struct MapRenderer::Impl {
         }
         return bool(markerTexture->mClientTexture);
     }
+    bool prepareEntityCircles() {
+        if (!group) return false;
+        if (!circleTexture || !group->isLoaded(circleLocation, false, cg::TextureSetLayerType::Color)) {
+            auto pixels = EntityCircleAtlas::pixels();
+            mce::Image image(EntityCircleAtlas::width, EntityCircleAtlas::height, mce::ImageFormat::RGBA8Unorm, mce::ImageUsage::SRGB);
+            image.resizeImageBytesToFitImageDescription();
+            if (image.mImageBytes.size() != pixels.size() * sizeof(std::uint32_t)) return false;
+            std::memcpy(image.mImageBytes.data(), pixels.data(), image.mImageBytes.size());
+            group->uploadTexture(circleLocation, cg::ImageBuffer(std::move(image)));
+            circleTexture = std::make_unique<mce::TexturePtr>(group, circleLocation);
+        }
+        return bool(circleTexture->mClientTexture);
+    }
 };
 
 MapRenderer::MapRenderer() : mImpl(std::make_unique<Impl>()) {}
@@ -151,9 +166,11 @@ void MapRenderer::reset() {
     }
     mImpl->portraitTextures.clear();
     mImpl->markerTexture.reset();
+    mImpl->circleTexture.reset();
     mImpl->texture.reset();
     if (mImpl->group) {
         mImpl->group->unloadTexture(mImpl->markerLocation, false);
+        mImpl->group->unloadTexture(mImpl->circleLocation, false);
         mImpl->group->unloadTexture(mImpl->location, false);
     }
     mImpl->group.reset();
@@ -387,7 +404,9 @@ void MapRenderer::renderEntities(
     // Resolve each texture once per pass, retaining its owner through flushImages.
     std::unordered_map<std::string_view, mce::TexturePtr const*> portraits;
     int conversionBudget = 1; // Avoid loading/converting many new types in one HUD frame.
-    if (settings.entityPortraits && group) {
+    bool usePortraits = entityPortraitsEnabled(settings, fullscreen);
+    bool circlesReady = mImpl->prepareEntityCircles();
+    if (usePortraits && group) {
         for (auto const& marker : markers) {
             auto portrait = entityPortrait(marker.type);
             if (portrait && !portraits.contains(portrait->texture))
@@ -402,7 +421,7 @@ void MapRenderer::renderEntities(
     ctx.setClippingRectangle(rect(area.x, area.y, area.width, area.height));
     // Small leaders retain the real map position when crowded portraits fan out.
     // Draw them before heads so a connector never covers another creature's face.
-    for (auto const& marker : markers) {
+    if (usePortraits) for (auto const& marker : markers) {
         float dx = marker.x - marker.anchorX, dy = marker.y - marker.anchorY;
         float distance = std::max(std::abs(dx), std::abs(dy));
         if (distance < 1) continue;
@@ -418,12 +437,15 @@ void MapRenderer::renderEntities(
     // Keep each portrait's source texture and alpha in its own submission.
     // Mixing species in one UI image batch can reuse another species' texture.
     // Draw lower entities first, leaving same-height entities on top.
+    std::vector<PlacedEntity const*> circles;
+    circles.reserve(markers.size());
     for (bool below : {true, false}) for (bool players : {false, true}) {
         float opacity = below ? settings.undergroundEntityOpacity : 1.0f;
+        circles.clear();
         for (auto const& marker : markers) {
             if (marker.player != players || marker.below != below) continue;
             float scale = marker.iconScale;
-            auto portrait = settings.entityPortraits ? entityPortrait(marker.type) : nullptr;
+            auto portrait = usePortraits ? entityPortrait(marker.type) : nullptr;
             auto it = portrait ? portraits.find(portrait->texture) : portraits.end();
             if (it != portraits.end() && it->second) {
                 float size = entityPortraitSize * scale;
@@ -435,10 +457,33 @@ void MapRenderer::renderEntities(
                 }, [&] { ctx.flushImages(mce::Color(255, 255, 255), opacity, mImpl->material); });
                 continue;
             }
-            // Unmapped types and missing/pending pack textures retain visible dots.
-            ctx.fillRectangle(rect(marker.x - 2 * scale, marker.y - 2 * scale, 4 * scale, 4 * scale),
-                marker.player ? mce::Color(70, 225, 255) : mce::Color(255, 180, 70), opacity);
+            circles.push_back(&marker);
         }
+        // All colors share one atlas and opacity, so circles need only one submission per group.
+        // Finish portrait submissions first to keep their textures out of this batch.
+        for (auto marker : circles) {
+            int index = EntityCircleAtlas::index(marker->disposition, marker->player);
+            float size = 6 * marker->iconScale;
+            if (circlesReady) {
+                auto const& data = mImpl->circleTexture->mClientTexture;
+                ctx.drawImage(data->mClientTexture.get(), {marker->x - size / 2, marker->y - size / 2},
+                    {size, size}, {float(index) / EntityCircleAtlas::columns, 0},
+                    {1.0f / EntityCircleAtlas::columns, 1}, false);
+            } else {
+                // Keep round markers visible even if the runtime texture is unavailable.
+                auto rgb = EntityCircleAtlas::colors[index];
+                mce::Color color(int(rgb & 255), int((rgb >> 8) & 255), int((rgb >> 16) & 255));
+                for (int row = 0; row < 8; ++row) {
+                    float y = (row + 0.5f) / 4 - 1;
+                    float outer = std::sqrt(1 - y * y) * size / 2;
+                    float inner = std::sqrt(std::max(0.0f, 0.25f - y * y)) * size / 2;
+                    for (int side : {-1, 1}) ctx.fillRectangle(
+                        rect(marker->x + (side < 0 ? -outer : inner), marker->y - size / 2 + row * size / 8,
+                            outer - inner, size / 8), color, opacity);
+                }
+            }
+        }
+        if (circlesReady && !circles.empty()) ctx.flushImages(mce::Color(255, 255, 255), opacity, mImpl->material);
     }
     for (bool below : {true, false}) for (auto const& marker : markers) {
         if (marker.count < 2 || marker.below != below) continue;
