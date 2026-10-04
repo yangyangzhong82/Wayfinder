@@ -65,6 +65,7 @@ void Wayfinder::Impl::Input::openMap(Impl& app) {
         !foreground())
         return;
     restoreMouse = app.session.client->getMouseGrabbed();
+    app.rendering.recovery.retryNow(Clock::now());
     InputTransition transition(transitioning);
     // Mark ownership before calling engine APIs so exception cleanup restores input.
     app.view.fullscreen = true;
@@ -127,6 +128,7 @@ void Wayfinder::Impl::Input::key(Impl& app, ll::event::KeyInputEvent& event) {
             changed.showMinimap = !changed.showMinimap;
             saveSettings(app.mod.getConfigDir(), changed);
             app.settings = changed;
+            if (changed.showMinimap) app.rendering.recovery.retryNow(Clock::now());
         }
         consumedKeys.insert(code);
         event.cancel();

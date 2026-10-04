@@ -419,3 +419,8 @@ WF_TEXT("Record deaths", "Record deaths", "记录死亡点")
 WF_TEXT("Full map key", "Full map key", "全屏地图按键")
 WF_TEXT("Minimap toggle key", "Minimap toggle key", "小地图显隐按键")
 WF_TEXT("Position: left to right / top to bottom", "Position: left to right / top to bottom", "位置：从左到右 / 从上到下")
+
+// Rendering recovery: local client notifications, independent of map textures.
+WF_TEXT("render.retrying", "Map rendering failed. Up to 3 automatic retries while the map is visible; press the full-map key to retry now.", "地图绘制失败。地图显示时最多自动重试3次；按全屏地图键可立即重试。")
+WF_TEXT("render.stopped", "Map rendering paused after repeated failures. Press the full-map key, or turn the minimap off and on, to retry. See the log for details.", "地图多次绘制失败，已暂停。按全屏地图键，或关闭再开启小地图重试；详情见日志。")
+WF_TEXT("render.restored", "Map rendering restored.", "地图显示已恢复。")

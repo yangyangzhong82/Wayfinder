@@ -16,7 +16,8 @@ class MapRenderer {
 public:
     MapRenderer();
     ~MapRenderer();
-    void render(
+    // False means resources are not ready, not a successful recovery frame.
+    bool render(
         MinecraftUIRenderContext&         context,
         MapRect const&                    area,
         MapView const&                    view,

@@ -1,4 +1,5 @@
 #include "wayfinder/MapArchive.h"
+#include "wayfinder/RenderRecovery.h"
 #include "wayfinder/MapMarkers.h"
 #include "wayfinder/MapMenu.h"
 #include "wayfinder/MapTeleport.h"
@@ -37,6 +38,70 @@ TileRecord tile(int x, int z, std::uint32_t color = rgba(70, 150, 90)) {
     result.tile.lastTouched = std::uint64_t(x + 10);
     result.tile.cells.fill(MapCell{color, 64});
     return result;
+}
+void renderRecoveryTests() {
+    using namespace std::chrono_literals;
+    using Time = RenderRecovery::Clock::time_point;
+    RenderRecovery recovery;
+    Time now{};
+    require(recovery.ready(now) && !recovery.recovering(), "A fresh session draws normally");
+    recovery.failed(now);
+    require(!recovery.ready(now + 1999ms) && recovery.ready(now + 2s), "First failure waits two seconds");
+    now += 2s;
+    recovery.failed(now);
+    require(!recovery.ready(now + 4999ms) && recovery.ready(now + 5s), "Second failure waits five seconds");
+    now += 5s;
+    recovery.failed(now);
+    require(!recovery.ready(now + 9999ms) && recovery.ready(now + 10s), "Third failure waits ten seconds");
+    now += 10s;
+    recovery.failed(now);
+    require(recovery.stopped() && !recovery.ready(now + 24h), "Persistent failure stops after three automatic retries");
+
+    recovery.retryNow(now);
+    require(recovery.ready(now) && recovery.recovering() && !recovery.stopped(), "Manual retry bypasses the stopped state immediately");
+    require(recovery.succeeded(now), "First completed retry notifies recovery");
+    require(!recovery.succeeded(now + 1ms), "Healthy frames do not spam recovery notices");
+    require(!recovery.recovering(), "Manual recovery resumes ordinary rendering");
+
+    recovery.failed(now + 2ms);
+    recovery.retryNow(now + 3ms);
+    require(recovery.ready(now + 3ms), "Manual retry also bypasses automatic backoff");
+    recovery.failed(now + 4ms);
+    require(recovery.failures() == 1 && !recovery.ready(now + 5ms), "A failed manual attempt starts a new bounded retry cycle");
+
+    // A single good frame between failures must not create an infinite loop.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        now += 20s;
+        require(recovery.ready(now), "Scheduled retry becomes available");
+        require(recovery.succeeded(now), "Intermittent recovery emits one notice");
+        recovery.retryNow(now); // Opening a healthy map must not replenish its budget.
+        recovery.failed(now + 1ms);
+    }
+    require(recovery.stopped(), "Intermittent failures still exhaust the same burst budget");
+
+    recovery.retryNow(now);
+    recovery.failed(now);
+    now += 2s;
+    recovery.succeeded(now);
+    for (int second = 1; second < 30; ++second) recovery.succeeded(now + std::chrono::seconds(second));
+    require(recovery.failures() == 1, "Less than thirty stable seconds retains the failure budget");
+    recovery.succeeded(now + 30s);
+    require(recovery.failures() == 0, "Thirty seconds of actual healthy frames replenishes retries");
+    now += 31s;
+    recovery.failed(now);
+    require(!recovery.ready(now + 1999ms) && recovery.ready(now + 2s), "Later independent faults get a fresh retry budget");
+
+    recovery.succeeded(now + 2s);
+    recovery.succeeded(now + 62s);
+    require(recovery.failures() == 1, "Time hidden, in menus or without textures does not count as stable drawing");
+    recovery = {};
+    require(recovery.ready(now) && recovery.failures() == 0 && !recovery.recovering(), "Leaving or entering a world clears recovery state");
+    Locale locale;
+    for (auto language : {"en_US", "zh_CN"}) {
+        locale.select(language, "en_US");
+        for (auto key : {"render.retrying", "render.stopped", "render.restored"})
+            require(locale.tr(key) != key && !locale.tr(key).empty(), "Recovery notices exist in both supported languages");
+    }
 }
 void damage(std::filesystem::path const& path) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
@@ -762,7 +827,7 @@ void inspectionAndSlimeTests(TestDirectory const& dir) {
 int main(int argc, char** argv) {
     try {
         TestDirectory dir;
-        archiveTests(dir); warmStartTests(); waypointTests(dir); markerTests(); menuAndSettingsTests(dir);
+        renderRecoveryTests(); archiveTests(dir); warmStartTests(); waypointTests(dir); markerTests(); menuAndSettingsTests(dir);
         teleportAndContextTests(); reliefTests(dir); terrainShapeTests(dir); detailTests(dir); zoomTests(dir); closeupTests(dir);
         inspectionAndSlimeTests(dir); cliffAndPeakTests(dir);
         if (argc > 1 && std::string_view(argv[1]) == "--preview") {
@@ -770,7 +835,7 @@ int main(int argc, char** argv) {
             exportTerrainStylePreview();
             exportCliffPeakPreview();
         }
-        std::cout << checks << " checks passed: history, waypoints, settings, teleport menu/coordinates and terrain relief.\n";
+        std::cout << checks << " checks passed: render recovery, history, waypoints, settings, teleport menu/coordinates and terrain relief.\n";
     } catch (std::exception const& ex) {
         std::cerr << "FAILED after " << checks << " checks: " << ex.what() << '\n';
         return 1;

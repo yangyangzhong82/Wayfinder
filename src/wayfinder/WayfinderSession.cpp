@@ -49,7 +49,7 @@ void Wayfinder::Impl::Session::begin(Impl& app, IClientInstance& ci) {
     sampler.reset();
     app.rendering.pixels.clear();
     app.rendering.resetTexture = true;
-    app.rendering.failed = false;
+    app.rendering.recovery = {};
     player.dimension = static_cast<int>(ci.getLocalPlayer()->getDimensionId());
     layer = MapLayer{player.dimension};
     overworldSkyDarken = 0;
@@ -133,6 +133,7 @@ void Wayfinder::Impl::Session::end(Impl& app) {
     app.input.consumedMouse.clear();
     app.input.dragging = false;
     app.rendering.resetTexture = true;
+    app.rendering.recovery = {};
 }
 
 void Wayfinder::Impl::Session::tick(Impl& app, ll::event::ClientLevelTickEvent& event) {

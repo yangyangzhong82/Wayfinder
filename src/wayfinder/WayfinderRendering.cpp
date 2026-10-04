@@ -40,26 +40,60 @@ void Wayfinder::Impl::Rendering::refreshImage(Impl& app, MapView const& view) {
     renderedView = smooth ? view : textureView;
 }
 
+void Wayfinder::Impl::Rendering::notify(Impl& app, std::string_view message) {
+    // Use the game's local chat UI, independent of the failed map textures.
+    // No packet is sent and no raw exception text is shown to the player.
+    try {
+        if (auto client = app.session.client)
+            client->getGuiData()->displayClientMessage("[Wayfinder] " + app.ui.state.locale.tr(message), std::nullopt, false);
+    } catch (std::exception const& ex) {
+        app.mod.getLogger().warn("Wayfinder render notification: {}", ex.what());
+    }
+}
+
 void Wayfinder::Impl::Rendering::render(Impl& app, ll::event::AfterUIRenderEvent& event) {
+    if (!event.uiRenderContext().mClient.isPrimaryClient() || !recovery.ready(Clock::now())) return;
+    try {
+        if (draw(app, event) && recovery.succeeded(Clock::now())) notify(app, "render.restored");
+    } catch (std::exception const& ex) {
+        recovery.failed(Clock::now());
+        resetTexture = true;
+        // Restore input immediately. Rebuilding resources is deferred to a later
+        // UI callback, never performed while unwinding the failed draw.
+        try { app.input.closeMap(app, true); }
+        catch (std::exception const& cleanup) {
+            app.mod.getLogger().warn("Wayfinder render input cleanup: {}", cleanup.what());
+        }
+        app.mod.getLogger().error("Wayfinder render failure {} ({}): {}", recovery.failures(),
+            recovery.stopped() ? "automatic retries stopped" : "will retry", ex.what());
+        if (recovery.stopped()) notify(app, "render.stopped");
+        else if (recovery.failures() == 1) notify(app, "render.retrying");
+    }
+}
+
+bool Wayfinder::Impl::Rendering::draw(Impl& app, ll::event::AfterUIRenderEvent& event) {
     auto& ctx = event.uiRenderContext();
     auto& ci = ctx.mClient;
-    if (!ci.isPrimaryClient()) return;
+    if (!ci.isPrimaryClient()) return false;
     if (resetTexture) {
         if (renderer) renderer->reset();
+        pixels.clear();
+        biomes = {};
+        lastRaster = {};
         resetTexture = false;
     }
-    if (!app.session.client || app.session.client != &ci || !ci.getLocalPlayer()) return;
+    if (!app.session.client || app.session.client != &ci || !ci.getLocalPlayer()) return false;
     app.ui.pollText(app);
     // Keep the map alive while its embedded text editor is completing.
     if (app.view.fullscreen && !app.ui.textInput.active() && (!foreground() || !hud(ci)))
         app.input.closeMap(app, false);
-    if (failed || event.screenView().getScreenName() != "hud_screen" || !hud(ci)) return;
-    if (!app.view.fullscreen && !app.settings.showMinimap) return;
+    if (event.screenView().getScreenName() != "hud_screen" || !hud(ci)) return false;
+    if (!app.view.fullscreen && !app.settings.showMinimap) return false;
     app.ui.refreshLocale(app.settings);
     auto gui = ci.getGuiData();
     auto const& size = gui->mScreenSizeData;
     float width = size->clientUIScreenSize->x, height = size->clientUIScreenSize->y;
-    if (width < 112 || height < 144) return;
+    if (width < 112 || height < 144) return false;
     if (app.view.fullscreen && (app.view.guiWidth != width || app.view.guiHeight != height)) {
         app.input.dragging = false;
         app.input.hasMouse = false;
@@ -101,52 +135,50 @@ void Wayfinder::Impl::Rendering::render(Impl& app, ll::event::AfterUIRenderEvent
                 + (biome.empty() ? app.ui.state.locale.tr("Unknown") : app.ui.state.locale.biome(biome));
         }
     }
-    try {
-        if (app.view.fullscreen) {
-            ctx.saveCurrentClippingRectangle();
-            ctx.setFullClippingRectangle();
-            ctx.fillRectangle(RectangleArea{0, width, 0, height}, mce::Color(10, 16, 23), 0.97f);
-            ctx.restoreSavedClippingRectangle();
-        }
-        renderer->render(ctx, app.view.area, renderedView, textureView, pixels, biomes, imageRevision, app.session.player.x,
-                         app.session.player.z, app.session.player.yaw, caption, app.view.fullscreen, app.settings,
-                         app.ui.state.locale, app.view.fullscreen ? app.view.following : true,
-                         app.session.player.biome, cursorInfo, layerLabel, app.session.trail, layer, layer == app.session.layer);
-        Navigation retraceNavigation;
-        auto navigation = &app.session.navigation;
-        std::optional<Settings> retraceSettings;
-        if (auto target = app.session.trail.retraceTarget(app.ui.state.locale)) {
-            auto const& trailPoint = app.session.trail.points[*app.session.trail.retraceIndex()];
-            if (trailPoint.layer != app.session.layer && target->y && std::abs(*target->y - app.session.player.y) >= 0.5)
-                target->name = app.ui.state.locale.tr(target->y && *target->y > app.session.player.y
-                    ? "Retrace upstairs" : "Retrace downstairs");
-            retraceNavigation = *navigation;
-            target->id = retraceNavigation.nextId;
-            target->color = 5;
-            retraceNavigation.points.push_back(*target);
-            retraceNavigation.target = target->id;
-            navigation = &retraceNavigation;
-            if (!app.settings.showNavigation) {
-                retraceSettings = app.settings;
-                retraceSettings->showNavigation = true;
-            }
-        }
-        renderer->renderMarkers(ctx, app.view.area, renderedView, *navigation, layer, app.session.player.dimension,
-                                app.session.player.x, app.session.player.y, app.session.player.z, app.view.fullscreen,
-                                retraceSettings ? *retraceSettings : app.settings,
-                                app.ui.state.locale);
-        if (layer == app.session.layer) renderer->renderEntities(ctx, app.view.area, renderedView, app.session.entities, layer,
-                                 app.session.player.x, app.session.player.y, app.session.player.z,
-                                 app.settings, app.ui.state.locale, app.view.fullscreen);
-        if (app.view.fullscreen) {
-            if (app.ui.state.page == MapMenu::Page::Explore) app.ui.refreshExploration(app);
-            app.ui.frame = app.ui.state.build(width, height, app.settings, app.session.navigation);
-            renderer->renderUi(ctx, app.ui.frame, app.input.mouseX, app.input.mouseY);
-        }
-    } catch (std::exception const& ex) {
-        failed = true;
-        app.input.closeMap(app, true);
-        app.mod.getLogger().error("Wayfinder renderer disabled for this session: {}", ex.what());
+    if (app.view.fullscreen) {
+        ctx.saveCurrentClippingRectangle();
+        struct RestoreClip {
+            MinecraftUIRenderContext& context;
+            ~RestoreClip() { context.restoreSavedClippingRectangle(); }
+        } restoreClip{ctx};
+        ctx.setFullClippingRectangle();
+        ctx.fillRectangle(RectangleArea{0, width, 0, height}, mce::Color(10, 16, 23), 0.97f);
     }
+    bool terrainReady = renderer->render(ctx, app.view.area, renderedView, textureView, pixels, biomes, imageRevision, app.session.player.x,
+                     app.session.player.z, app.session.player.yaw, caption, app.view.fullscreen, app.settings,
+                     app.ui.state.locale, app.view.fullscreen ? app.view.following : true,
+                     app.session.player.biome, cursorInfo, layerLabel, app.session.trail, layer, layer == app.session.layer);
+    Navigation retraceNavigation;
+    auto navigation = &app.session.navigation;
+    std::optional<Settings> retraceSettings;
+    if (auto target = app.session.trail.retraceTarget(app.ui.state.locale)) {
+        auto const& trailPoint = app.session.trail.points[*app.session.trail.retraceIndex()];
+        if (trailPoint.layer != app.session.layer && target->y && std::abs(*target->y - app.session.player.y) >= 0.5)
+            target->name = app.ui.state.locale.tr(target->y && *target->y > app.session.player.y
+                ? "Retrace upstairs" : "Retrace downstairs");
+        retraceNavigation = *navigation;
+        target->id = retraceNavigation.nextId;
+        target->color = 5;
+        retraceNavigation.points.push_back(*target);
+        retraceNavigation.target = target->id;
+        navigation = &retraceNavigation;
+        if (!app.settings.showNavigation) {
+            retraceSettings = app.settings;
+            retraceSettings->showNavigation = true;
+        }
+    }
+    renderer->renderMarkers(ctx, app.view.area, renderedView, *navigation, layer, app.session.player.dimension,
+                            app.session.player.x, app.session.player.y, app.session.player.z, app.view.fullscreen,
+                            retraceSettings ? *retraceSettings : app.settings,
+                            app.ui.state.locale);
+    if (layer == app.session.layer) renderer->renderEntities(ctx, app.view.area, renderedView, app.session.entities, layer,
+                             app.session.player.x, app.session.player.y, app.session.player.z,
+                             app.settings, app.ui.state.locale, app.view.fullscreen);
+    if (app.view.fullscreen) {
+        if (app.ui.state.page == MapMenu::Page::Explore) app.ui.refreshExploration(app);
+        app.ui.frame = app.ui.state.build(width, height, app.settings, app.session.navigation);
+        renderer->renderUi(ctx, app.ui.frame, app.input.mouseX, app.input.mouseY);
+    }
+    return terrainReady;
 }
 } // namespace wayfinder

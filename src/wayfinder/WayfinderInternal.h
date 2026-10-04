@@ -9,6 +9,7 @@
 #include "wayfinder/MapMouse.h"
 #include "wayfinder/MapInspection.h"
 #include "wayfinder/MapRenderer.h"
+#include "wayfinder/RenderRecovery.h"
 #include "wayfinder/TerrainSampler.h"
 #include "wayfinder/WayfinderView.h"
 #include "ll/api/event/EventBus.h"
@@ -166,7 +167,8 @@ struct Wayfinder::Impl {
 
     struct Rendering {
         std::unique_ptr<MapRenderer> renderer;
-        bool resetTexture{}, failed{};
+        bool resetTexture{};
+        RenderRecovery recovery;
         MapView renderedView; // Visible world rectangle shared by overlays and pointer projection.
         MapView textureView;  // World rectangle of pixels, including the minimap border.
         std::vector<std::uint32_t> pixels;
@@ -179,6 +181,8 @@ struct Wayfinder::Impl {
 
         void refreshImage(Impl& app, MapView const& view);
         void render(Impl& app, ll::event::AfterUIRenderEvent& event);
+        bool draw(Impl& app, ll::event::AfterUIRenderEvent& event);
+        void notify(Impl& app, std::string_view message);
     };
 
     ll::mod::NativeMod& mod;

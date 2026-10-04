@@ -178,7 +178,7 @@ void MapRenderer::reset() {
     mImpl->width = mImpl->height = 0;
 }
 
-void MapRenderer::render(
+bool MapRenderer::render(
     MinecraftUIRenderContext&         ctx,
     MapRect const&                    area,
     MapView const&                    view,
@@ -201,9 +201,9 @@ void MapRenderer::render(
     MapLayer                          layer,
     bool                              showPlayer
 ) {
-    if (pixels.size() != static_cast<std::size_t>(textureView.width) * textureView.height) return;
+    if (pixels.size() != static_cast<std::size_t>(textureView.width) * textureView.height) return false;
     auto group = ctx.mClient.getTextureGroup();
-    if (!group) return;
+    if (!group) return false;
     if (mImpl->group != group) {
         reset();
         mImpl->group = group;
@@ -223,7 +223,7 @@ void MapRenderer::render(
             mce::ImageUsage::SRGB
         );
         image.resizeImageBytesToFitImageDescription();
-        if (image.mImageBytes.size() != pixels.size() * sizeof(std::uint32_t)) return;
+        if (image.mImageBytes.size() != pixels.size() * sizeof(std::uint32_t)) return false;
         if (settings.showBiomeRegions || slimeVisible || (settings.showTrail && !trail.points.empty())) {
             auto composited = pixels;
             if (settings.showBiomeRegions) overlayBiomes(composited, textureView, biomes);
@@ -248,7 +248,7 @@ void MapRenderer::render(
         mImpl->biomeVisible = settings.showBiomeRegions;
     }
     auto const& data = mImpl->texture->mClientTexture;
-    if (!data) return;
+    if (!data) return false;
     ctx.saveCurrentClippingRectangle();
     struct RestoreClip {
         MinecraftUIRenderContext& context;
@@ -388,6 +388,7 @@ void MapRenderer::render(
         );
     }
     ctx.flushText(0.0f, std::nullopt);
+    return true;
 }
 void MapRenderer::renderEntities(
     MinecraftUIRenderContext& ctx, MapRect const& area, MapView const& view,
