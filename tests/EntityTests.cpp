@@ -400,19 +400,13 @@ std::vector<PlacedEntity> crowdTests() {
     require(std::accumulate(markers.begin(), markers.end(), 0, [](int n, auto const& m) { return n + m.count; }) == 33,
             "Clustering preserves the exact total creature and player count");
     for (auto const& marker : markers) {
-        auto box = entityVisualBounds(marker, s);
-        require(box.x >= 0 && box.y >= 0 && box.x+box.width <= 128 && box.y+box.height <= 128,
-                "Crowded portraits and count badges stay inside the map");
-        require(!box.intersects({60,60,8,8}), "Crowded entities leave the local player's position visible");
-        require(std::abs(marker.x-marker.anchorX) <= 37.5f && std::abs(marker.y-marker.anchorY) <= 37.5f,
-                "Fan-out is bounded near the real position instead of moving icons across the map");
+        // JE-style: icons never fan out; each sits on its creatures' real (average) position.
+        require(marker.x == marker.anchorX && marker.y == marker.anchorY,
+                "Crowded portraits stay at their true map position instead of drifting");
         if (marker.type == "minecraft:skeleton") require(marker.count == (marker.below ? 6 : 20)
             && marker.opacity == (marker.below ? 0.35f : 1.0f), "Surface and underground groups have independent counts and opacity");
         else require(marker.count == 1, "A common species never replaces another species or a player");
     }
-    for (std::size_t i = 0; i < markers.size(); ++i) for (std::size_t j = i+1; j < markers.size(); ++j)
-        require(!entityVisualBounds(markers[i],s).intersects(entityVisualBounds(markers[j],s)),
-                "The mixed crowd's avatars and number badges do not obscure one another");
     for (auto const& player : markers) if (player.player)
         for (auto const& marker : markers) require(!player.label.intersects(entityVisualBounds(marker,s)),
                 "Player names find space outside crowded heads and count badges");
@@ -447,11 +441,18 @@ std::vector<PlacedEntity> crowdTests() {
     s.minimapEntityCircles = false;
     mixed = {{0,-63,64,-63,"minecraft:cow",{},false}, {0,-62,64,-62,"minecraft:cow",{},false},
         {0,-63,64,-63,"minecraft:zombie",{},false}};
-    for (auto const& marker : project()) {
-        auto box = entityVisualBounds(marker,s);
-        require(box.x >= 0 && box.y >= 0 && box.x+box.width <= 128 && box.y+box.height <= 128,
-                "Edge clusters retain their complete count badges");
-    }
+    for (auto const& marker : project())
+        require(marker.x == marker.anchorX && marker.y == marker.anchorY,
+                "Edge clusters are clipped by the map instead of being pushed inward");
+    // Stability: a creature walking a little must not regroup or move its neighbours.
+    mixed = {{0,10,64,10,"minecraft:cow",{},false}, {0,13,64,10,"minecraft:cow",{},false},
+        {0,-20,64,-20,"minecraft:zombie",{},false}};
+    auto before = project();
+    mixed[1].x += 0.5;
+    auto after = project();
+    require(before.size() == after.size(), "Small movement keeps the same clusters");
+    for (std::size_t i = 0; i < before.size(); ++i) if (before[i].type == "minecraft:zombie")
+        require(after[i].x == before[i].x && after[i].y == before[i].y, "Unrelated markers never move when others walk");
     s.minimapEntityCircles = true; s.entityPortraits = false; s.entityRadius = 128;
     mixed.push_back({0,0,64,0,"minecraft:cow",{},false});
     mixed.push_back({0,0,64,0,"minecraft:player","Alex",true});

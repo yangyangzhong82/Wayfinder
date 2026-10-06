@@ -177,14 +177,14 @@ inline std::vector<PlacedEntity> layoutEntities(
         || view.blocksPerPixel <= 0) return result;
     auto origin = view.worldAt(0, 0);
     // Only portrait mode clusters. Circle mode keeps one marker per creature.
-    // World-anchored cells never combine different species, relationships, height groups or players.
-    using ClusterKey = std::tuple<double, double, std::string, bool, EntityDisposition>;
-    std::map<ClusterKey, std::size_t> clusters;
+    // Clusters never combine different species, relationships, height groups or players.
     float scale = fullscreen ? 1.0f : settings.minimapEntityScale;
     bool usePortraits = entityPortraitsEnabled(settings, fullscreen);
-    float cellPixels = std::max(8.0f, (usePortraits ? entityPortraitSize + 2 : 6) * scale + 2);
-    double cellX = cellPixels * view.width * view.blocksPerPixel / area.width;
-    double cellZ = cellPixels * view.height * view.blocksPerPixel / area.height;
+    // Same-kind creatures merge only when their icons would overlap on screen.
+    // Distance-based (not world grid cells), so crossing a cell line never makes a marker jump.
+    float mergeRadius = std::max(8.0f, (usePortraits ? entityPortraitSize + 2 : 6) * scale + 2);
+    struct Candidate { EntityMarker const* entity; float x, y; bool below; };
+    std::vector<Candidate> candidates;
     for (auto const& entity : entities) {
         if (!allowedEntityType(settings, entity.type)
             || !nearbyEntity(entity, layer, playerX, playerY, playerZ, settings.entityRadius)) continue;
@@ -192,26 +192,51 @@ inline std::vector<PlacedEntity> layoutEntities(
         float y = area.y + float((entity.z - origin[1]) / (view.height * view.blocksPerPixel)) * area.height;
         // Off-screen entities are not pinned to the edge like navigation targets.
         if (!area.contains(x, y)) continue;
-        bool below = playerY - entity.y >= settings.entityDepthThreshold;
-        if (usePortraits && !entity.player) {
-            auto [cluster, inserted] = clusters.try_emplace(
-                ClusterKey{std::floor(entity.x / cellX), std::floor(entity.z / cellZ), entity.type, below, entity.disposition}, result.size());
-            if (!inserted) {
-                auto& marker = result[cluster->second];
-                ++marker.count;
-                marker.x += (x - marker.x) / marker.count;
-                marker.y += (y - marker.y) / marker.count;
-                marker.anchorX = marker.x; marker.anchorY = marker.y;
-                continue;
-            }
+        candidates.push_back({&entity, x, y, playerY - entity.y >= settings.entityDepthThreshold});
+    }
+    // Greedy clustering in a canonical order: engine iteration order and the
+    // player's own movement cannot change which creatures end up together.
+    std::vector<std::size_t> canonical(candidates.size());
+    std::iota(canonical.begin(), canonical.end(), 0);
+    if (usePortraits) std::sort(canonical.begin(), canonical.end(), [&](auto a, auto b) {
+        auto key = [&](Candidate const& c) {
+            return std::tuple{std::string_view(c.entity->type), c.below, c.entity->disposition, c.entity->player,
+                c.entity->x, c.entity->z, c.entity->y, std::string_view(c.entity->name)};
+        };
+        return key(candidates[a]) < key(candidates[b]);
+    });
+    struct Cluster { std::size_t head, first; double sumX, sumY; int count; };
+    std::vector<Cluster> clusters;
+    for (auto i : canonical) {
+        auto const& c = candidates[i];
+        Cluster* best = nullptr;
+        float bestDistance = mergeRadius;
+        if (usePortraits && !c.entity->player) for (auto& cluster : clusters) {
+            auto const& head = candidates[cluster.head];
+            if (head.entity->player || head.below != c.below || head.entity->type != c.entity->type
+                || head.entity->disposition != c.entity->disposition) continue;
+            float distance = std::max(std::abs(float(cluster.sumX / cluster.count) - c.x),
+                                      std::abs(float(cluster.sumY / cluster.count) - c.y));
+            if (distance < bestDistance) { bestDistance = distance; best = &cluster; }
         }
+        if (!best) { clusters.push_back({i, i, c.x, c.y, 1}); continue; }
+        best->sumX += c.x; best->sumY += c.y; ++best->count;
+        best->first = std::min(best->first, i);
+    }
+    // Emit in snapshot order; each icon sits exactly on its creatures' average position.
+    std::sort(clusters.begin(), clusters.end(), [](auto const& a, auto const& b) { return a.first < b.first; });
+    for (auto const& cluster : clusters) {
+        auto const& head = candidates[cluster.head];
+        auto const& entity = *head.entity;
+        float x = float(cluster.sumX / cluster.count), y = float(cluster.sumY / cluster.count);
         result.push_back({x, y, entity.player, entity.player
             ? (entity.name.empty() ? entityTypeLabel("minecraft:player", locale) : entity.name) : "", {}, 0.6f, entity.type});
         auto& marker = result.back();
+        marker.count = cluster.count;
         marker.disposition = entity.disposition;
         marker.fullscreen = fullscreen;
         marker.iconScale = scale;
-        marker.below = below;
+        marker.below = head.below;
         marker.opacity = marker.below ? settings.undergroundEntityOpacity : 1.0f;
         marker.anchorX = x; marker.anchorY = y;
     }
@@ -230,39 +255,10 @@ inline std::vector<PlacedEntity> layoutEntities(
         };
         return priority(lhs) < priority(rhs);
     });
-    std::vector<std::array<int, 2>> offsets;
-    for (int dy = -3; dy <= 3; ++dy) for (int dx = -3; dx <= 3; ++dx) offsets.push_back({dx, dy});
-    std::sort(offsets.begin(), offsets.end(), [](auto a, auto b) {
-        return std::tuple{a[0]*a[0]+a[1]*a[1], a[1], a[0]} < std::tuple{b[0]*b[0]+b[1]*b[1], b[1], b[0]};
-    });
-    for (auto index : order) {
-        auto& marker = result[index];
-        auto original = entityVisualBounds(marker, settings);
-        float paddingX = marker.x - original.x, paddingY = marker.y - original.y;
-        auto fits = [&](MapRect const& box) {
-            return box.x >= area.x && box.y >= area.y && box.x + box.width <= area.x + area.width
-                && box.y + box.height <= area.y + area.height
-                && std::none_of(occupied.begin(), occupied.end(), [&](auto const& other) { return box.intersects(other); });
-        };
-        // Circles stay at the exact projection, including overlaps and clipped map edges.
-        // Their occupied bounds still guide player-name placement below.
-        if (usePortraits && !fits(original)) {
-            float step = std::max(4.0f, entityIconSize(marker, settings) + 2);
-            // Bounded fan-out keeps icons near the real position. Prefer the
-            // smallest displacement; unchanged input produces unchanged placement.
-            for (auto [dx, dy] : offsets) {
-                float x = marker.anchorX + dx * step, y = marker.anchorY + dy * step;
-                if (original.width <= area.width)
-                    x = std::clamp(x, area.x + paddingX, area.x + area.width - original.width + paddingX);
-                if (original.height <= area.height)
-                    y = std::clamp(y, area.y + paddingY, area.y + area.height - original.height + paddingY);
-                MapRect box{x-paddingX, y-paddingY, original.width, original.height};
-                if (!fits(box)) continue;
-                marker.x = x; marker.y = y; break;
-            }
-        }
-        occupied.push_back(entityVisualBounds(marker, settings));
-    }
+    // Every icon stays at its true projected position (JE minimap style): no fan-out,
+    // so icons never drift away from their creatures or hop when neighbours move.
+    // Overlap is resolved by merging above; the bounds still guide player names.
+    for (auto index : order) occupied.push_back(entityVisualBounds(result[index], settings));
     for (auto index : order) {
         auto& marker = result[index];
         if (!marker.player) continue;
