@@ -1,5 +1,6 @@
 #pragma once
 #include <filesystem>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,8 @@ struct Settings {
     std::string terrainMode{"auto"}; // auto / surface / cave; cave height follows the player.
     int         caveSwitchY{48}; // Overworld auto mode: enter at/below this Y, exit four blocks higher.
     float       minimapOpacity{0.92f};
+    int         minimapFrameColor{0};     // Index into minimapFrameColorNames; the last entry hides the frame.
+    float       minimapInfoOpacity{0.8f}; // Background of the minimap header tab and info rows.
     float       minimapPositionX{1.0f}, minimapPositionY{0.0f};
     bool        showCoordinates{true}, showWaypoints{true}, showNavigation{true}, recordDeaths{true};
     bool        recordTrail{true}, showTrail{true};
@@ -47,6 +50,10 @@ struct Settings {
     // Set a unique profile per remote world to opt into cross-session history.
     std::string cacheProfile;
 };
+// Translation keys for the minimap frame palette; MapRenderer holds the matching RGB values.
+inline constexpr char const* minimapFrameColorNames[]{
+    "frame.slate", "frame.teal", "frame.gold", "frame.silver", "frame.rose", "frame.violet", "frame.none"};
+inline constexpr int minimapFrameColorCount = static_cast<int>(std::size(minimapFrameColorNames));
 Settings loadSettings(std::filesystem::path const& directory);
 void     saveSettings(std::filesystem::path const& directory, Settings const& settings);
 void     normalizeSettings(Settings& settings);

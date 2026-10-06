@@ -519,10 +519,11 @@ void relationshipTests() {
     for (int column = 0; column < EntityCircleAtlas::columns; ++column) {
         uniqueColors.insert(EntityCircleAtlas::colors[column]);
         auto pixel = [&](int x, int y) { return pixels[y * EntityCircleAtlas::width + column * EntityCircleAtlas::tileSize + x]; };
-        require((pixel(0, 0) >> 24) == 0 && (pixel(7, 7) >> 24) == 0,
-                "Circle atlas has transparent corners and center, without a square backdrop");
-        require((pixel(2, 7) >> 24) == 255 && (pixel(2, 7) & 0x00ffffff) == (EntityCircleAtlas::colors[column] & 0x00ffffff),
-                "Every ring contains an opaque band in its own relationship color");
+        require((pixel(0, 0) >> 24) == 0, "Circle atlas has transparent corners, without a square backdrop");
+        require((pixel(7, 7) >> 24) == 255 && (pixel(7, 7) & 0x00ffffff) == (EntityCircleAtlas::colors[column] & 0x00ffffff),
+                "Every dot has a solid center in its own relationship color");
+        require((pixel(2, 7) >> 24) == 255 && (pixel(2, 7) & 0x00ffffff) == (EntityCircleAtlas::outline & 0x00ffffff),
+                "Every dot has an opaque dark rim");
         for (int edge = 0; edge < 16; ++edge)
             require((pixel(0,edge) >> 24) == 0 && (pixel(15,edge) >> 24) == 0
                 && (pixel(edge,0) >> 24) == 0 && (pixel(edge,15) >> 24) == 0,

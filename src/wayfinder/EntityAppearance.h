@@ -53,16 +53,25 @@ struct EntityCircleAtlas {
         rgba(255, 85, 85), rgba(200, 105, 255), rgba(70, 225, 255)
     };
     static int index(EntityDisposition disposition, bool player) { return player ? 5 : static_cast<int>(disposition); }
+    // Dark rim around solid dots, JE minimap style; readable on snow, sand and water.
+    static constexpr std::uint32_t outline = rgba(18, 22, 28);
     static std::vector<std::uint32_t> pixels() {
         std::vector<std::uint32_t> result(width * height);
         for (int y = 0; y < height; ++y) for (int x = 0; x < tileSize; ++x) {
             float dx = x + 0.5f - tileSize / 2, dy = y + 0.5f - tileSize / 2;
             float radius = std::sqrt(dx * dx + dy * dy);
             // A transparent outer texel isolates adjacent colors during linear filtering.
-            float coverage = std::clamp(7.5f - radius, 0.0f, 1.0f) * std::clamp(radius - 3.5f, 0.0f, 1.0f);
+            float coverage = std::clamp(7.5f - radius, 0.0f, 1.0f);
+            float fill = std::clamp(5.0f - radius, 0.0f, 1.0f); // 1 = dot color, 0 = rim (~2 texels)
             auto alpha = static_cast<std::uint32_t>(std::lround(coverage * 255));
-            for (int column = 0; column < columns; ++column)
-                result[y * width + column * tileSize + x] = (colors[column] & 0x00ffffff) | (alpha << 24);
+            for (int column = 0; column < columns; ++column) {
+                std::uint32_t rgb = 0;
+                for (int shift : {0, 8, 16}) {
+                    float c = float((colors[column] >> shift) & 255) * fill + float((outline >> shift) & 255) * (1 - fill);
+                    rgb |= static_cast<std::uint32_t>(std::lround(c)) << shift;
+                }
+                result[y * width + column * tileSize + x] = rgb | (alpha << 24);
+            }
         }
         return result;
     }

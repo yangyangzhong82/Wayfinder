@@ -84,7 +84,8 @@ enum class UiAction {
     EntityType, EntitySearch, EntityRadiusDown, EntityRadiusUp, EntityPortraits, MinimapEntityCircles,
     EntityScaleDown, EntityScaleUp, EntityTransparencyDown, EntityTransparencyUp,
     EntityDepthDown, EntityDepthUp,
-    Explore, LiveLayer, SelectLayer, RecordTrail, ShowTrail, Retrace, ClearTrail
+    Explore, LiveLayer, SelectLayer, RecordTrail, ShowTrail, Retrace, ClearTrail,
+    FrameColor, InfoOpacityDown, InfoOpacityUp
 };
 struct UiButton {
     MapRect       rect;

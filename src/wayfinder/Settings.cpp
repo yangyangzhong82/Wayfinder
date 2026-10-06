@@ -29,6 +29,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     caveSwitchY,
     cacheProfile,
     minimapOpacity,
+    minimapFrameColor,
+    minimapInfoOpacity,
     minimapPositionX,
     minimapPositionY,
     showCoordinates,
@@ -105,7 +107,8 @@ void normalizeSettings(Settings& s) {
         throw std::runtime_error("Map and zoom keys must be distinct");
     if (!std::isfinite(s.minimapSize) || !std::isfinite(s.minimapBlocksPerPixel) || !std::isfinite(s.minimapOpacity)
         || !std::isfinite(s.minimapPositionX) || !std::isfinite(s.minimapPositionY)
-        || !std::isfinite(s.minimapEntityScale) || !std::isfinite(s.undergroundEntityOpacity))
+        || !std::isfinite(s.minimapEntityScale) || !std::isfinite(s.undergroundEntityOpacity)
+        || !std::isfinite(s.minimapInfoOpacity))
         throw std::runtime_error("Map settings must be finite");
     s.sampleRadiusChunks    = std::clamp(s.sampleRadiusChunks, 1, 16);
     s.columnsPerTick        = std::clamp(s.columnsPerTick, 64, 8192);
@@ -119,6 +122,8 @@ void normalizeSettings(Settings& s) {
     s.minimapSize           = std::clamp(s.minimapSize, 64.0f, 256.0f);
     s.minimapBlocksPerPixel = std::clamp(s.minimapBlocksPerPixel, minMapBlocksPerPixel, 16.0);
     s.minimapOpacity        = std::clamp(s.minimapOpacity, 0.2f, 1.0f);
+    s.minimapFrameColor     = std::clamp(s.minimapFrameColor, 0, minimapFrameColorCount - 1);
+    s.minimapInfoOpacity    = std::clamp(s.minimapInfoOpacity, 0.0f, 1.0f);
     s.minimapPositionX      = std::clamp(s.minimapPositionX, 0.0f, 1.0f);
     s.minimapPositionY      = std::clamp(s.minimapPositionY, 0.0f, 1.0f);
     if (s.language != "auto" && s.language != "en_US" && s.language != "zh_CN") s.language = "auto";

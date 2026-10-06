@@ -29,18 +29,66 @@
 namespace wayfinder {
 namespace {
 RectangleArea rect(float x, float y, float width, float height) { return RectangleArea{x, x + width, y, y + height}; }
-void label(MinecraftUIRenderContext& ctx, float x, float y, float width, std::string text, float scale = 0.8f, float opacity = 1.0f) {
+void label(MinecraftUIRenderContext& ctx, float x, float y, float width, std::string text, float scale = 0.8f, float opacity = 1.0f,
+           mce::Color const& color = mce::Color(235, 241, 247)) {
     TextMeasureData  measure{scale, 0.0f, true, false, false, ui::TextAlignment::Left};
     CaretMeasureData caret{-1, false};
     ctx.drawDebugText(
         rect(x, y, width, 14),
         std::move(text),
-        mce::Color(235, 241, 247),
+        color,
         opacity,
         ui::TextAlignment::Left,
         measure,
         caret
     );
+}
+// Rough UTF-8 width estimate: ASCII glyphs are ~6px, CJK glyphs ~9px at scale 1.
+float textWidth(std::string_view text, float scale) {
+    float width = 0;
+    for (unsigned char ch : text)
+        if ((ch & 0xc0) != 0x80) width += (ch < 0x80 ? 6.0f : 9.0f) * scale;
+    return width;
+}
+
+// Minimap HUD styling. Rows below the map are contiguous so they read as one panel.
+constexpr float hudRowHeight   = 12.0f;
+constexpr float hudTextScale   = 0.65f;
+mce::Color hudPanelColor() { return mce::Color(12, 17, 23); }
+mce::Color hudAccentColor() { return mce::Color(91, 193, 180); }
+mce::Color hudTargetColor() { return mce::Color(240, 196, 92); }
+
+// Same order as minimapFrameColorNames; the final "none" entry has no color.
+std::optional<mce::Color> minimapFrameColor(int index) {
+    switch (index) {
+    case 0: return mce::Color(72, 104, 122);  // slate
+    case 1: return mce::Color(91, 193, 180);  // teal
+    case 2: return mce::Color(222, 178, 86);  // gold
+    case 3: return mce::Color(200, 208, 216); // silver
+    case 4: return mce::Color(214, 104, 140); // rose
+    case 5: return mce::Color(150, 120, 214); // violet
+    default: return std::nullopt;
+    }
+}
+
+void hudRow(MinecraftUIRenderContext& ctx, float x, float y, float width, std::string const& text, mce::Color const& bar,
+            float alpha) {
+    ctx.setFullClippingRectangle();
+    if (alpha > 0) ctx.fillRectangle(rect(x, y, width, hudRowHeight), hudPanelColor(), alpha);
+    ctx.fillRectangle(rect(x, y, 2, hudRowHeight), bar, 1.0f);
+    ctx.setClippingRectangle(rect(x + 3, y, width - 5, hudRowHeight));
+    label(ctx, x + 5, y + 2.5f, width - 7, text, hudTextScale);
+    ctx.flushText(0.0f, std::nullopt);
+    ctx.setFullClippingRectangle();
+}
+
+// Hollow frame built from strips, so a translucent minimap never gets a dark backing.
+void ring(MinecraftUIRenderContext& ctx, float x, float y, float width, float height, float thickness,
+          mce::Color const& color, float alpha) {
+    ctx.fillRectangle(rect(x, y, width, thickness), color, alpha);
+    ctx.fillRectangle(rect(x, y + height - thickness, width, thickness), color, alpha);
+    ctx.fillRectangle(rect(x, y + thickness, thickness, height - thickness * 2), color, alpha);
+    ctx.fillRectangle(rect(x + width - thickness, y + thickness, thickness, height - thickness * 2), color, alpha);
 }
 } // namespace
 
@@ -58,6 +106,8 @@ struct MapRenderer::Impl {
     bool                               slimeVisible{};
     bool                               biomeVisible{};
     int                                width{}, height{};
+    // Next free minimap info row; render() fills it so renderMarkers() can append below.
+    float                              infoRowY{};
     HashedString                       material{"ui_textured_and_glcolor"};
 
     struct PortraitTexture {
@@ -201,6 +251,7 @@ bool MapRenderer::render(
     MapLayer                          layer,
     bool                              showPlayer
 ) {
+    mImpl->infoRowY = area.y + area.height + 3;
     if (pixels.size() != static_cast<std::size_t>(textureView.width) * textureView.height) return false;
     auto group = ctx.mClient.getTextureGroup();
     if (!group) return false;
@@ -275,8 +326,7 @@ bool MapRenderer::render(
             if (placed.size() >= (fullscreen ? 24u : 4u)) break;
             auto name = locale.biome(biomes.names[region.biome - 1]);
             float scale = fullscreen ? 0.75f : 0.6f;
-            float width = 6;
-            for (unsigned char ch : name) if ((ch & 0xc0) != 0x80) width += (ch < 0x80 ? 6.0f : 9.0f) * scale;
+            float width = 6 + textWidth(name, scale);
             float height = 11;
             float x = area.x + float((region.x - origin[0]) / blocksPerGuiX);
             float z = area.y + float((region.z - origin[1]) / blocksPerGuiZ);
@@ -305,77 +355,126 @@ bool MapRenderer::render(
             ctx.fillRectangle(rect(area.x, area.y + float(y), area.width, 1), mce::Color(210, 220, 235), 0.35f);
     }
     ctx.setFullClippingRectangle();
-    ctx.drawRectangle(rect(area.x, area.y, area.width, area.height), mce::Color(57, 78, 94), 1.0f, 1);
-    ctx.setClippingRectangle(rect(area.x, area.y - 13, area.width, 13));
-    label(
-        ctx,
-        area.x + 2,
-        area.y - 11,
-        area.width,
-        fullscreen ? "WAYFINDER | " + layerLabel + " | " + locale.tr(following ? "Following" : "Free view")
-            + (settings.showSlimeChunks && layer.dimension == 0
-                ? " | " + locale.tr(slimeVisible ? "Slime chunks (green)" : "Slime chunks: zoom in") : "")
-                   : layerLabel,
-        0.7f
-    );
-    ctx.flushText(0.0f, std::nullopt);
-    ctx.setClippingRectangle(rect(area.x, area.y + area.height, area.width, 14));
-    auto info = caption;
-    if (fullscreen && settings.showBiome) {
-        if (!info.empty()) info += "  |  ";
-        info += locale.tr("Player biome: ") + (biome.empty() ? locale.tr("Unknown") : locale.biome(biome));
+    if (fullscreen) {
+        ctx.drawRectangle(rect(area.x, area.y, area.width, area.height), mce::Color(57, 78, 94), 1.0f, 1);
+        ctx.setClippingRectangle(rect(area.x, area.y - 13, area.width, 13));
+        label(
+            ctx,
+            area.x + 2,
+            area.y - 11,
+            area.width,
+            "WAYFINDER | " + layerLabel + " | " + locale.tr(following ? "Following" : "Free view")
+                + (settings.showSlimeChunks && layer.dimension == 0
+                    ? " | " + locale.tr(slimeVisible ? "Slime chunks (green)" : "Slime chunks: zoom in") : ""),
+            0.7f
+        );
+        ctx.flushText(0.0f, std::nullopt);
+        ctx.setClippingRectangle(rect(area.x, area.y + area.height, area.width, 14));
+        auto info = caption;
+        if (settings.showBiome) {
+            if (!info.empty()) info += "  |  ";
+            info += locale.tr("Player biome: ") + (biome.empty() ? locale.tr("Unknown") : locale.biome(biome));
+        }
+        label(ctx, area.x + 2, area.y + area.height + 3, area.width - 4, info, 0.65f);
+        ctx.flushText(0.0f, std::nullopt);
+        ctx.setFullClippingRectangle();
+    } else {
+        // Soft outer shadow, then a thin two-tone frame that hugs the terrain.
+        auto frameColor = minimapFrameColor(settings.minimapFrameColor);
+        float infoAlpha = settings.minimapInfoOpacity;
+        if (frameColor) {
+            ring(ctx, area.x - 3, area.y - 3, area.width + 6, area.height + 6, 1, mce::Color(0, 0, 0), 0.25f);
+            ring(ctx, area.x - 2, area.y - 2, area.width + 4, area.height + 4, 2, hudPanelColor(), 0.9f);
+            ring(ctx, area.x - 1, area.y - 1, area.width + 2, area.height + 2, 1, *frameColor, 1.0f);
+        }
+        // Header tab: dimension/layer name sits on a small chip attached to the frame.
+        if (!layerLabel.empty()) {
+            float tabWidth = std::min(area.width + 4, textWidth(layerLabel, 0.7f) + 12);
+            float tabY     = area.y - 15;
+            if (infoAlpha > 0) ctx.fillRectangle(rect(area.x - 2, tabY, tabWidth, 13), hudPanelColor(), infoAlpha);
+            ctx.fillRectangle(rect(area.x - 2, tabY, tabWidth, 1), frameColor.value_or(hudAccentColor()), 1.0f);
+            ctx.setClippingRectangle(rect(area.x, tabY, tabWidth - 4, 13));
+            label(ctx, area.x + 3, tabY + 3, tabWidth - 6, layerLabel, 0.7f);
+            ctx.flushText(0.0f, std::nullopt);
+            ctx.setFullClippingRectangle();
+        }
+        // Info rows form one contiguous strip under the map.
+        float rowY = area.y + area.height + 3;
+        if (!caption.empty()) {
+            hudRow(ctx, area.x - 2, rowY, area.width + 4, caption, hudAccentColor(), infoAlpha);
+            rowY += hudRowHeight;
+        }
+        if (settings.showBiome) {
+            hudRow(ctx, area.x - 2, rowY, area.width + 4,
+                locale.tr("Player biome: ") + (biome.empty() ? locale.tr("Unknown") : locale.biome(biome)),
+                mce::Color(126, 178, 96), infoAlpha);
+            rowY += hudRowHeight;
+        }
+        mImpl->infoRowY = rowY;
     }
-    label(ctx, area.x + 2, area.y + area.height + 3, area.width - 4, info, 0.65f);
-    ctx.flushText(0.0f, std::nullopt);
-    ctx.setFullClippingRectangle();
 
     auto  point = view.worldAt(0, 0);
     float px    = area.x + static_cast<float>((playerX - point[0]) / (view.width * view.blocksPerPixel)) * area.width;
     float py    = area.y + static_cast<float>((playerZ - point[1]) / (view.height * view.blocksPerPixel)) * area.height;
     if (showPlayer && area.contains(px, py)) {
+        ctx.setClippingRectangle(rect(area.x, area.y, area.width, area.height));
         float angle = yaw * std::numbers::pi_v<float> / 180.0f;
         float dx = -std::sin(angle), dy = std::cos(angle);
-        for (int i = 0; i < 6; ++i) {
-            float sx = px + dx * i, sy = py + dy * i;
-            if (area.contains(sx - 1, sy - 1) && area.contains(sx + 1, sy + 1))
-                ctx.fillRectangle(rect(sx - 1, sy - 1, 2, 2), mce::Color(255, 238, 112), 1.0f);
+        // Dark outline pass first so the heading stays readable on snow, sand and water.
+        for (int pass = 0; pass < 2; ++pass) {
+            float pad = pass == 0 ? 1.0f : 0.0f;
+            auto  color = pass == 0 ? mce::Color(10, 14, 18) : mce::Color(255, 226, 92);
+            float alpha = pass == 0 ? 0.7f : 1.0f;
+            for (int i = 2; i < 8; ++i) {
+                // Taper from 3px at the body to 1px at the tip.
+                float w = (i < 4 ? 3.0f : i < 6 ? 2.0f : 1.0f) + pad * 2;
+                float sx = px + dx * i, sy = py + dy * i;
+                ctx.fillRectangle(rect(sx - w / 2, sy - w / 2, w, w), color, alpha);
+            }
         }
-        if (area.contains(px - 2, py - 2) && area.contains(px + 2, py + 2))
-            ctx.fillRectangle(rect(px - 2, py - 2, 4, 4), mce::Color(255, 255, 255), 1.0f);
+        ctx.fillRectangle(rect(px - 3.5f, py - 3.5f, 7, 7), mce::Color(10, 14, 18), 0.75f);
+        ctx.fillRectangle(rect(px - 2.5f, py - 2.5f, 5, 5), mce::Color(255, 255, 255), 1.0f);
+        ctx.fillRectangle(rect(px - 1.5f, py - 1.5f, 3, 3), mce::Color(255, 226, 92), 1.0f);
+        ctx.setFullClippingRectangle();
     }
     ctx.setClippingRectangle(rect(area.x, area.y, area.width, area.height));
     if (settings.showCompass) {
-        label(ctx, area.x + area.width * 0.5f - 3, area.y + 2, 24, locale.tr("N"), 0.65f);
-        label(ctx, area.x + area.width - 10, area.y + area.height * 0.5f - 3, 20, locale.tr("E"), 0.65f);
-        label(ctx, area.x + area.width * 0.5f - 3, area.y + area.height - 10, 24, locale.tr("S"), 0.65f);
-        label(ctx, area.x + 3, area.y + area.height * 0.5f - 3, 20, locale.tr("W"), 0.65f);
+        // Each letter gets a small chip; north is highlighted for quick orientation.
+        struct Cardinal { char const* key; float x, y; bool north; };
+        float cx = area.x + area.width * 0.5f, cy = area.y + area.height * 0.5f;
+        Cardinal cardinals[] = {
+            {"N", cx, area.y + 6, true},
+            {"E", area.x + area.width - 6, cy, false},
+            {"S", cx, area.y + area.height - 6, false},
+            {"W", area.x + 6, cy, false},
+        };
+        for (auto const& c : cardinals) {
+            auto  text = locale.tr(c.key);
+            float w = std::max(9.0f, textWidth(text, 0.6f) + 4);
+            ctx.fillRectangle(rect(c.x - w / 2, c.y - 5, w, 10), hudPanelColor(), c.north ? 0.85f : 0.6f);
+            label(ctx, c.x - w / 2 + 2, c.y - 3.5f, w, text, 0.6f, 1.0f,
+                c.north ? mce::Color(255, 112, 96) : mce::Color(220, 228, 236));
+        }
     }
     if (settings.showScale && area.height >= 40) {
         auto  scale = mapScale(view, area.width);
-        float x = area.x + 5, y = area.y + area.height - 5;
-        ctx.fillRectangle(rect(x, y, float(scale.pixels), 1), mce::Color(255, 255, 255), 1);
-        ctx.fillRectangle(rect(x, y - 3, 1, 4), mce::Color(255, 255, 255), 1);
-        ctx.fillRectangle(rect(x + float(scale.pixels), y - 3, 1, 4), mce::Color(255, 255, 255), 1);
         std::ostringstream text;
         text << scale.blocks << locale.tr(" blocks");
-        label(ctx, x, y - 12, area.width - 10, text.str(), 0.6f);
+        float barWidth = float(scale.pixels);
+        float boxWidth = std::max(barWidth, textWidth(text.str(), 0.55f)) + 8;
+        // Bottom-left, offset so it does not collide with the compass "S"/"W" chips.
+        float x = area.x + 5, y = area.y + area.height - 5;
+        // On narrow maps the box would reach the centered "S" chip; lift it above.
+        if (settings.showCompass && x - 3 + boxWidth > area.x + area.width * 0.5f - 6) y -= 12;
+        ctx.fillRectangle(rect(x - 3, y - 13, boxWidth, 16), hudPanelColor(), 0.55f);
+        ctx.fillRectangle(rect(x, y, barWidth + 1, 2), mce::Color(10, 14, 18), 0.8f);
+        ctx.fillRectangle(rect(x, y, barWidth, 1), mce::Color(255, 255, 255), 1);
+        ctx.fillRectangle(rect(x, y - 3, 1, 4), mce::Color(255, 255, 255), 1);
+        ctx.fillRectangle(rect(x + barWidth, y - 3, 1, 4), mce::Color(255, 255, 255), 1);
+        label(ctx, x, y - 11, boxWidth - 6, text.str(), 0.55f);
     }
     ctx.flushText(0.0f, std::nullopt);
     ctx.setFullClippingRectangle();
-    if (settings.showBiome && !fullscreen) {
-        float y = area.y + area.height + 16;
-        ctx.setClippingRectangle(rect(area.x, y, area.width, 12));
-        label(
-            ctx,
-            area.x + 2,
-            y,
-            area.width - 4,
-            locale.tr("Player biome: ") + (biome.empty() ? locale.tr("Unknown") : locale.biome(biome)),
-            0.65f
-        );
-        ctx.flushText(0.0f, std::nullopt);
-        ctx.setFullClippingRectangle();
-    }
     if (fullscreen) {
         label(
             ctx,
@@ -442,6 +541,8 @@ void MapRenderer::renderEntities(
     circles.reserve(markers.size());
     for (bool below : {true, false}) for (bool players : {false, true}) {
         float opacity = below ? settings.undergroundEntityOpacity : 1.0f;
+        // Lower entities are dimmed as well as faded, so depth reads at a glance.
+        auto tint = below ? mce::Color(150, 150, 150) : mce::Color(255, 255, 255);
         circles.clear();
         for (auto const& marker : markers) {
             if (marker.player != players || marker.below != below) continue;
@@ -451,11 +552,21 @@ void MapRenderer::renderEntities(
             if (it != portraits.end() && it->second) {
                 float size = entityPortraitSize * scale;
                 float left = marker.x - size / 2, top = marker.y - size / 2;
+                // 1px dark outline hugging the head's real footprint (JE minimap style).
+                float minX = 1, minY = 1, maxX = 0, maxY = 0;
+                for (auto const& part : portrait->parts) {
+                    minX = std::min(minX, part.x);
+                    minY = std::min(minY, part.y);
+                    maxX = std::max(maxX, part.x + part.width);
+                    maxY = std::max(maxY, part.y + part.height);
+                }
+                ctx.fillRectangle(rect(left + minX * size - 1, top + minY * size - 1,
+                    (maxX - minX) * size + 2, (maxY - minY) * size + 2), mce::Color(18, 22, 28), 0.9f * opacity);
                 auto const& data = it->second->mClientTexture;
                 submitPortrait(*portrait, [&](std::string_view, PortraitPart const& part) {
                     ctx.drawImage(data->mClientTexture.get(), {left + part.x * size, top + part.y * size},
                         {part.width * size, part.height * size}, {part.u, part.v}, {part.uw, part.vh}, false);
-                }, [&] { ctx.flushImages(mce::Color(255, 255, 255), opacity, mImpl->material); });
+                }, [&] { ctx.flushImages(tint, opacity, mImpl->material); });
                 continue;
             }
             circles.push_back(&marker);
@@ -473,18 +584,22 @@ void MapRenderer::renderEntities(
             } else {
                 // Keep round markers visible even if the runtime texture is unavailable.
                 auto rgb = EntityCircleAtlas::colors[index];
-                mce::Color color(int(rgb & 255), int((rgb >> 8) & 255), int((rgb >> 16) & 255));
-                for (int row = 0; row < 8; ++row) {
-                    float y = (row + 0.5f) / 4 - 1;
-                    float outer = std::sqrt(1 - y * y) * size / 2;
-                    float inner = std::sqrt(std::max(0.0f, 0.25f - y * y)) * size / 2;
-                    for (int side : {-1, 1}) ctx.fillRectangle(
-                        rect(marker->x + (side < 0 ? -outer : inner), marker->y - size / 2 + row * size / 8,
-                            outer - inner, size / 8), color, opacity);
-                }
+                float shade = below ? 150.0f / 255 : 1.0f;
+                mce::Color color(int((rgb & 255) * shade), int(((rgb >> 8) & 255) * shade), int(((rgb >> 16) & 255) * shade));
+                auto disc = [&](float radius, mce::Color const& c) {
+                    for (int row = 0; row < 8; ++row) {
+                        float y = (row + 0.5f) / 4 - 1;
+                        float half = std::sqrt(std::max(0.0f, 1 - y * y)) * radius;
+                        ctx.fillRectangle(rect(marker->x - half, marker->y + y * radius - radius / 8, half * 2, radius / 4),
+                            c, opacity);
+                    }
+                };
+                // Same solid dot + dark rim as the atlas.
+                disc(size / 2, mce::Color(18, 22, 28));
+                disc(size / 2 - std::max(0.75f, size / 8), color);
             }
         }
-        if (circlesReady && !circles.empty()) ctx.flushImages(mce::Color(255, 255, 255), opacity, mImpl->material);
+        if (circlesReady && !circles.empty()) ctx.flushImages(tint, opacity, mImpl->material);
     }
     for (bool below : {true, false}) for (auto const& marker : markers) {
         if (marker.count < 2 || marker.below != below) continue;
@@ -561,9 +676,15 @@ void MapRenderer::renderMarkers(
     }
     ctx.flushText(0.0f, std::nullopt);
     ctx.setFullClippingRectangle();
-    if (target && settings.showNavigation) {
+    if (target && settings.showNavigation && !fullscreen) {
+        // Append to the contiguous info strip started by render().
+        hudRow(ctx, area.x - 2, mImpl->infoRowY, area.width + 4,
+            targetDescription(*target, dimension, playerX, playerY, playerZ, locale), hudTargetColor(),
+            settings.minimapInfoOpacity);
+        mImpl->infoRowY += hudRowHeight;
+    } else if (target && settings.showNavigation) {
         float y = area.y + area.height + 29;
-        if (fullscreen) ctx.fillRectangle(rect(area.x - 3, y - 1, area.width + 6, 13), mce::Color(12, 17, 23), 0.92f);
+        ctx.fillRectangle(rect(area.x - 3, y - 1, area.width + 6, 13), mce::Color(12, 17, 23), 0.92f);
         ctx.setClippingRectangle(rect(area.x, y, area.width, 12));
         label(
             ctx,

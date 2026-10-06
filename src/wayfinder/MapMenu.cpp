@@ -441,6 +441,15 @@ int MapMenu::action(UiButton const& b, Settings& s, Navigation& nav) {
     case UiAction::OpacityUp:
         s.minimapOpacity += 0.1f;
         break;
+    case UiAction::FrameColor:
+        s.minimapFrameColor = (s.minimapFrameColor + 1) % minimapFrameColorCount;
+        break;
+    case UiAction::InfoOpacityDown:
+        s.minimapInfoOpacity -= 0.1f;
+        break;
+    case UiAction::InfoOpacityUp:
+        s.minimapInfoOpacity += 0.1f;
+        break;
     case UiAction::Left:
         s.minimapPositionX -= 0.1f;
         break;
@@ -691,6 +700,9 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         zoom << std::fixed << std::setprecision(2) << (2.0 / s.minimapBlocksPerPixel) << "x";
         stepper("Minimap zoom", zoom.str(), UiAction::MinimapZoomOut, UiAction::MinimapZoomIn);
         stepper("Opacity", std::to_string(int(std::round(s.minimapOpacity * 100))) + "%", UiAction::OpacityDown, UiAction::OpacityUp);
+        setting("Frame color", UiAction::FrameColor, locale.tr(minimapFrameColorNames[s.minimapFrameColor]));
+        stepper("Info panel opacity", std::to_string(int(std::round(s.minimapInfoOpacity * 100))) + "%",
+                UiAction::InfoOpacityDown, UiAction::InfoOpacityUp);
         stepper("Horizontal position", std::to_string(int(std::round(s.minimapPositionX * 100))) + "%", UiAction::Left, UiAction::Right);
         stepper("Vertical position", std::to_string(int(std::round(s.minimapPositionY * 100))) + "%", UiAction::Up, UiAction::Down);
         if (frame.message.empty()) frame.message = locale.tr("Position: left to right / top to bottom");
