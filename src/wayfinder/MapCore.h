@@ -77,8 +77,8 @@ struct TileRecord {
 struct MapBounds {
     double minX{}, minZ{}, maxX{}, maxZ{};
 };
-// A small height-only halo; material snapshots are never copied just to shade
-// neighbouring terrain. Four blocks separate hill shape from single-block steps.
+// A one-block height-only halo; material snapshots are never copied just to
+// shade neighbouring terrain or outline close-up ledges.
 struct TerrainHeight {
     int height{};
     std::uint8_t depth{};
@@ -89,7 +89,7 @@ struct TerrainHeight {
 };
 class TerrainNeighborhood {
 public:
-    static constexpr int radius = 4, side = 16 + 2 * radius;
+    static constexpr int radius = 1, side = 16 + 2 * radius;
     static constexpr std::array<std::array<int, 2>, 4> directions{{{0, -1}, {-1, 0}, {0, 1}, {1, 0}}};
     explicit TerrainNeighborhood(MapTile const& tile) {
         for (int z = 0; z < 16; ++z) for (int x = 0; x < 16; ++x) at(x, z) = tile.cells[z * 16 + x];
@@ -177,66 +177,27 @@ struct ColorAggregate {
         ++count;
     }
 };
-inline float terrainShade(MapCell const& cell, TerrainHeight north, TerrainHeight west,
-                          TerrainHeight south = {}, TerrainHeight east = {},
-                          TerrainHeight northFar = {}, TerrainHeight westFar = {},
-                          TerrainHeight southFar = {}, TerrainHeight eastFar = {}) {
+// Java Edition map relief: each block is lit by comparing it with the block to
+// its north (and, more weakly, its west), so every height step reads as a
+// crisp light or shadow band instead of a smoothed gradient. Height above the
+// northern neighbour catches light; a drop below it falls into shadow.
+inline float terrainShade(MapCell const& cell, TerrainHeight north, TerrainHeight west) {
     if (cell.flags) return 1.0f;
-    float shade;
     if (cell.depth > 0) {
         // Continuous depth shading makes shores and deep channels distinguishable.
-        shade = 1.08f - 0.50f * cell.depth / (cell.depth + 10.0f);
-    } else {
-        auto gradient = [&](TerrainHeight before, TerrainHeight after, float distance, float fallback) {
-            int count = int(before.land()) + int(after.land());
-            if (!count) return fallback;
-            float difference = (before.land() ? float(cell.height - before.height) : 0.0f)
-                + (after.land() ? float(after.height - cell.height) : 0.0f);
-            return difference / (count * distance);
-        };
-        auto slope = [&](TerrainHeight before, TerrainHeight after, TerrainHeight farBefore, TerrainHeight farAfter) {
-            float near = gradient(before, after, 1, 0);
-            // Fall back on each side independently. A flat far sample on the
-            // other side must not erase the gradient of a nearby cliff.
-            float beforeSlope = farBefore.land() ? (cell.height - farBefore.height) / 4.0f
-                : before.land() ? float(cell.height - before.height) : 0.0f;
-            float afterSlope = farAfter.land() ? (farAfter.height - cell.height) / 4.0f
-                : after.land() ? float(after.height - cell.height) : 0.0f;
-            int count = int(before.land() || farBefore.land()) + int(after.land() || farAfter.land());
-            float broad = count ? (beforeSlope + afterSlope) / count : near;
-            float difference = 0.3f * near + 0.7f * broad;
-            return std::copysign(std::log2(1.0f + std::abs(difference)), difference);
-        };
-        // Central slopes illuminate both sides of a hill. The wider sample makes
-        // terraces read as one hillside instead of disconnected one-block bands.
-        // Symmetric peaks have zero central slope. Local convexity separates
-        // summits/cliff lips from hollows/cliff feet even across the light axis.
-        // Require opposite samples so fog borders cannot invent a ridge.
-        auto curvature = [&](TerrainHeight before, TerrainHeight after, float distance, float fallback) {
-            if (!before.land() || !after.land()) return fallback;
-            return (2.0f * cell.height - before.height - after.height) / (2.0f * distance);
-        };
-        auto shape = [&](TerrainHeight before, TerrainHeight after, TerrainHeight farBefore, TerrainHeight farAfter) {
-            float near = curvature(before, after, 1, 0);
-            float broad = curvature(farBefore, farAfter, 4, near);
-            return 0.45f * near + 0.55f * broad;
-        };
-        float position = 0.5f * (shape(north, south, northFar, southFar)
-            + shape(west, east, westFar, eastFar));
-        float prominence = 0.12f * position / (1.0f + std::abs(position));
-        float occlusion = 0;
-        for (auto neighbor : {north, west, south, east})
-            if (neighbor.land()) occlusion += std::clamp((neighbor.height - cell.height - 1.0f) / 12.0f, 0.0f, 1.0f);
-        float altitude = std::clamp(1.0f + (cell.height - 64) * 0.0005f, 0.95f, 1.06f);
-        float directional = 0.18f * slope(north, south, northFar, southFar)
-            + 0.13f * slope(west, east, westFar, eastFar);
-        // Leave headroom for shape contrast before the final material-safe clamp:
-        // a sun-facing cliff's top and bottom must not both clip to white.
-        float relief = 0.20f * directional / std::sqrt(0.04f + directional * directional)
-            + prominence - 0.025f * occlusion;
-        shade = std::clamp(1.0f + relief, 0.72f, 1.22f) * altitude;
+        return 1.08f - 0.50f * cell.depth / (cell.depth + 10.0f);
     }
-    return shade;
+    // One block is already a clear step; taller cliffs grow slowly so material
+    // colour survives. Unknown and water neighbours never invent a step.
+    auto step = [&](TerrainHeight neighbor) {
+        if (!neighbor.land() || neighbor.height == cell.height) return 0.0f;
+        float difference = float(cell.height - neighbor.height);
+        return std::copysign(0.7f + 0.1f * std::log2(std::abs(difference)), difference);
+    };
+    float relief = 0.21f * step(north) + 0.10f * step(west);
+    // Broad plateaus keep a hint of altitude in far overviews.
+    float altitude = std::clamp(1.0f + (cell.height - 64) * 0.0005f, 0.95f, 1.06f);
+    return std::clamp(1.0f + relief, 0.76f, 1.22f) * altitude;
 }
 inline std::uint32_t shadePixel(std::uint32_t color, float shade) {
     auto channel = [&](int shift) {
@@ -248,20 +209,7 @@ inline std::uint32_t shadedColor(MapCell const& cell, MapCell const& north, MapC
     return cell.known() ? shadePixel(cell.color, terrainShade(cell, north, west)) : 0;
 }
 inline float terrainShadeAt(MapCell const& cell, TerrainNeighborhood const& heights, int x, int z) {
-    auto continuousFar = [&](int dx, int dz) {
-        int previous = cell.height;
-        TerrainHeight sample;
-        for (int distance = 1; distance <= TerrainNeighborhood::radius; ++distance) {
-            sample = heights.at(x + dx * distance, z + dz * distance);
-            // Do not smear a roof/cliff onto flat ground or bridge water/fog.
-            // Broad relief follows connected gentle steps, not height alone.
-            if (!sample.land() || std::abs(sample.height - previous) > 3) return TerrainHeight{};
-            previous = sample.height;
-        }
-        return sample;
-    };
-    return terrainShade(cell, heights.at(x, z - 1), heights.at(x - 1, z), heights.at(x, z + 1), heights.at(x + 1, z),
-        continuousFar(0, -1), continuousFar(-1, 0), continuousFar(0, 1), continuousFar(1, 0));
+    return terrainShade(cell, heights.at(x, z - 1), heights.at(x - 1, z));
 }
 inline ColorAggregate tileOverview(MapTile const& tile, MapLighting lighting = {}) {
     ColorAggregate result;

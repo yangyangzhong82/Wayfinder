@@ -26,7 +26,9 @@ public:
     std::set<std::uint64_t> selectedWaypoints;
     std::string batchGroup;
     int         offset{}, visibleRows{1}, rowCount{};
-    int         settingsTab{};
+    // Each settings tab fits one page in a normal window; small windows paginate.
+    enum SettingsTabs { MinimapTab, TerrainTab, ContentTab, GeneralTab, SettingsTabCount };
+    int         settingsTab{MinimapTab};
     float       contextX{}, contextY{};
     bool        contextLoading{};
     bool        confirmDelete{}, confirmReset{}, selectAll{}, errorMessage{};

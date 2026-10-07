@@ -453,7 +453,7 @@ void settingsTests(TestDirectory const& dir) {
     normalizeSettings(settings);
     require(settings.terrainMode == "auto", "Unknown terrain modes fall back to automatic");
     menu.open(MapMenu::Page::Settings);
-    menu.settingsTab = 1;
+    menu.settingsTab = MapMenu::TerrainTab;
     auto frame       = menu.build(420, 280, settings, navigation);
     require(
         std::any_of(
@@ -461,12 +461,12 @@ void settingsTests(TestDirectory const& dir) {
             frame.buttons.end(),
             [](auto const& b) { return b.action == UiAction::TerrainMode; }
         ),
-        "Terrain mode is reachable in the overlay settings"
+        "Terrain mode is reachable in the terrain settings"
     );
     for (auto action : {UiAction::CaveHeightDown, UiAction::CaveHeightUp})
         require(
             std::any_of(frame.buttons.begin(), frame.buttons.end(), [&](auto const& b) { return b.action == action; }),
-            "Both height controls are reachable in overlay settings"
+            "Both height controls are reachable in terrain settings"
         );
 }
 void lightingTests(TestDirectory const& dir) {

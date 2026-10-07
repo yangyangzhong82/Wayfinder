@@ -137,7 +137,7 @@ void settingsTests(Directory const& dir) {
     require(loadSettings(dir.path / "settings").showBiomeRegions, "Biome region setting persists");
     settings.showBiome = false;
     require(settings.showBiomeRegions, "Biome regions are independent of the player/cursor name switch");
-    menu.open(MapMenu::Page::Settings); menu.settingsTab = 1;
+    menu.open(MapMenu::Page::Settings); menu.settingsTab = MapMenu::ContentTab;
     bool found = false;
     for (int page = 0; page < 20; ++page) {
         auto frame = menu.build(420, 280, settings, nav);

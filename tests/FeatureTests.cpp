@@ -561,36 +561,31 @@ void reliefTests(TestDirectory const& dir) {
 void terrainShapeTests(TestDirectory const& dir) {
     auto land = [](int y) { return MapCell{rgba(100, 150, 80), std::int16_t(y)}; };
     auto cell = land(64);
-    float flat = terrainShade(cell, cell, cell, cell, cell, cell, cell, cell, cell);
-    require(terrainShade(cell, cell, cell, land(68), cell) > flat,
-        "A slope is visible when its only higher neighbour is south");
-    require(terrainShade(cell, cell, cell, cell, land(68)) > flat,
-        "A slope is visible when its only higher neighbour is east");
-    require(terrainShade(cell, cell, cell, cell, cell, land(60), cell, land(68), cell) > flat,
-        "A flat step still receives the wider hillside's light");
-    require(terrainShade(cell, cell, cell, cell, cell, land(68), cell, land(60), cell) < flat,
-        "The opposite broad slope is distinguishable at the same height and material");
-    require(terrainShade(cell, land(70), land(70), land(70), land(70))
-        < terrainShade(cell, land(58), land(58), land(58), land(58)),
-        "Hollows have subtle occlusion while ridges keep their colour");
-    require(terrainShade(cell, {}, {}, {}, {}, {}, {}, {}, {}) == flat,
-        "Unexplored neighbours create neither broad shadows nor occlusion");
+    float flat = terrainShade(cell, cell, cell);
+    require(terrainShade(cell, land(63), cell) > flat && terrainShade(cell, land(65), cell) < flat,
+        "Java-style relief: rising above the northern block catches light, dropping below it is shadowed");
+    require(terrainShade(cell, cell, land(63)) > flat && terrainShade(cell, cell, land(65)) < flat,
+        "East-west steps remain visible through the west neighbour");
+    require(terrainShade(cell, land(63), cell) - flat > terrainShade(cell, cell, land(63)) - flat,
+        "The northern comparison dominates, as on Java Edition maps");
+    require(terrainShade(cell, land(63), cell) - flat >= 0.10f,
+        "A single-block step is a clearly visible band");
+    require(terrainShade(cell, land(56), cell) > terrainShade(cell, land(63), cell),
+        "Taller steps produce stronger relief");
+    require(terrainShade(cell, {}, {}) == flat, "Unexplored neighbours never invent a step");
     MapCell water{rgba(40, 90, 180), 64, 5};
-    require(terrainShade(cell, water, water, water, water, water, water, water, water) == flat,
-        "Water surfaces are excluded from both near and broad land slopes");
-    require(terrainShade(water, land(120), land(120), land(120), land(120))
-        == terrainShade(water, {}, {}, {}, {}), "Water depth shading is independent of surrounding cliffs");
+    require(terrainShade(cell, water, water) == flat, "Water surfaces are excluded from land relief");
+    require(terrainShade(water, land(120), land(120)) == terrainShade(water, {}, {}),
+        "Water depth shading is independent of surrounding cliffs");
     MapTile platform;
     platform.cells.fill(cell);
-    platform.cells[4 * 16 + 8] = land(72);
-    require(terrainShadeAt(cell, TerrainNeighborhood(platform), 8, 8) == flat,
-        "A distant sheer roof does not paint a broad light halo on flat ground");
-    for (int d = 1; d <= 4; ++d) platform.cells[(8 - d) * 16 + 8] = land(64 - d);
-    require(terrainShadeAt(cell, TerrainNeighborhood(platform), 8, 8) > flat,
-        "Continuous gentle steps retain broader hill lighting");
-    platform.cells[7 * 16 + 8] = water;
-    require(terrainShadeAt(cell, TerrainNeighborhood(platform), 8, 8) == flat,
-        "Broad relief does not connect two land surfaces across water");
+    for (int z = 6; z < 10; ++z) for (int x = 6; x < 10; ++x) platform.cells[z * 16 + x] = land(68);
+    TerrainNeighborhood plateau(platform);
+    require(terrainShadeAt(land(68), plateau, 8, 6) > terrainShadeAt(land(68), plateau, 8, 8),
+        "A plateau's northern rim is lit");
+    require(terrainShadeAt(land(68), plateau, 8, 8) == terrainShade(land(68), land(68), land(68)),
+        "A plateau's flat top keeps its material colour");
+    require(terrainShadeAt(cell, plateau, 8, 10) < flat, "The ground at a plateau's southern foot is shadowed");
     // Exercise all halo directions at both positive and negative chunk seams,
     // with a one-tile archive that evicts the centre while gathering neighbours.
     MapCache cache(64);
@@ -603,7 +598,7 @@ void terrainShapeTests(TestDirectory const& dir) {
             MapView view{center, center, scale, 24, 24};
             for (auto lighting : {MapLighting{}, MapLighting{true, 11}})
                 require(cache.rasterize(0, view, lighting) == archive.rasterize(0, view, lighting),
-                    "Four-direction broad relief agrees in live, evicted archive and far summaries");
+                    "Relief agrees in live, evicted archive and far summaries across chunk seams");
         }
     for (int direction = 0; direction < 4; ++direction) {
         MapCache shore;
@@ -618,16 +613,16 @@ void terrainShapeTests(TestDirectory const& dir) {
 void cliffAndPeakTests(TestDirectory const& dir) {
     auto land = [](int height) { return MapCell{rgba(120, 140, 100), std::int16_t(height), 0, 0, 15, 0}; };
     auto center = land(96);
-    auto flat = terrainShade(center, center, center, center, center);
-    auto peak = terrainShade(center, land(92), land(92), land(92), land(92));
-    auto hollow = terrainShade(center, land(100), land(100), land(100), land(100));
+    auto flat = terrainShade(center, center, center);
+    auto peak = terrainShade(center, land(92), land(92));
+    auto hollow = terrainShade(center, land(100), land(100));
     require(peak > flat + 0.08f && hollow < flat - 0.08f,
-        "Symmetric summits and hollows remain visible when central gradients cancel");
-    require(terrainShade(center, land(92), center, land(92), center) > flat + 0.06f,
-        "A narrow ridge retains shape contrast perpendicular to the light");
-    auto planar = terrainShade(center, land(95), land(95), land(97), land(97));
-    require(planar > flat && planar < flat * 1.22f, "Continuous hillsides keep bounded northwest lighting");
-    require(terrainShade(center, {}, {}, {}, {}) == flat, "Missing neighbours do not invent summit highlights");
+        "Summits and hollows stand out from flat ground");
+    auto planar = terrainShade(center, land(95), land(95));
+    require(planar > flat && planar <= flat * 1.22f, "Continuous hillsides keep bounded northwest lighting");
+    require(terrainShade(center, land(-64), land(-64)) <= flat * 1.22f
+        && terrainShade(center, land(320), land(320)) >= flat * 0.76f, "Tall cliffs keep material colour");
+    require(terrainShade(center, {}, {}) == flat, "Missing neighbours do not invent summit highlights");
     for (int direction = 0; direction < 4; ++direction) {
         auto offset = TerrainNeighborhood::directions[direction];
         MapCache cache(64);
@@ -738,13 +733,67 @@ void menuAndSettingsTests(TestDirectory const& dir) {
     auto upgraded = loadSettings(dir.path / "old-config");
     require(upgraded.fullMapKey == 187 && upgraded.toggleMinimapKey == 189
         && upgraded.minimapZoomInKey != 187 && upgraded.minimapZoomOutKey != 189, "Old +/- map bindings upgrade without a startup conflict");
-    for (int tab = 0; tab < 3; ++tab) {
+    for (int tab = 0; tab < MapMenu::SettingsTabCount; ++tab) {
         menu.settingsTab = tab;
         frame = menu.build(112, 144, s, nav);
         require(menu.visibleRows >= 1 && !frame.pagination.empty(), "Small windows preserve settings pagination");
         for (auto const& b : frame.buttons) require(b.rect.x >= 0 && b.rect.y >= 0
             && b.rect.x + b.rect.width <= 112 && b.rect.y + b.rect.height <= 144, "Controls fit a small window");
     }
+    // Every setting stays reachable after the regrouping, on one page per tab in a normal window.
+    std::set<UiAction> reachable, smallReachable;
+    menu.locale.select("en_US", "en_US");
+    for (int tab = 0; tab < MapMenu::SettingsTabCount; ++tab) {
+        menu.open(MapMenu::Page::Settings); menu.settingsTab = tab;
+        frame = menu.build(420, 280, s, nav);
+        require(frame.pagination.empty(), "Each settings tab fits on one page");
+        for (auto const& b : frame.buttons) {
+            reachable.insert(b.action);
+            require(b.rect.x >= frame.panel.x && b.rect.x + b.rect.width <= frame.panel.x + frame.panel.width + 0.01f,
+                "Settings controls stay inside the panel");
+        }
+        for (int page = 0; page < 16; ++page) {
+            for (auto const& b : menu.build(112, 144, s, nav).buttons) smallReachable.insert(b.action);
+            menu.action(action(UiAction::Next), s, nav);
+        }
+    }
+    for (auto a : {UiAction::ShowMap, UiAction::SizeUp, UiAction::MinimapZoomIn, UiAction::Left, UiAction::Right,
+             UiAction::Up, UiAction::Down, UiAction::OpacityUp, UiAction::FrameColor, UiAction::InfoOpacityUp,
+             UiAction::TerrainMode, UiAction::CaveHeightUp, UiAction::Lighting, UiAction::Water, UiAction::Leaves,
+             UiAction::Coordinates, UiAction::Biome, UiAction::Scale, UiAction::Compass, UiAction::Waypoints,
+             UiAction::Navigation, UiAction::ChunkBorders, UiAction::SlimeChunks, UiAction::BiomeRegions,
+             UiAction::ShowEntities, UiAction::Entities, UiAction::Language, UiAction::Deaths, UiAction::MapKey,
+             UiAction::ToggleKey, UiAction::ZoomInKey, UiAction::ZoomOutKey, UiAction::Performance, UiAction::ResetSettings})
+        require(reachable.contains(a) && smallReachable.contains(a), "Every setting remains reachable in normal and small windows");
+    menu.open(MapMenu::Page::Settings); menu.settingsTab = MapMenu::MinimapTab;
+    auto positionValue = [&] {
+        for (auto const& b : menu.build(420, 280, s, nav).buttons)
+            if (b.text == "Position") return b.value;
+        return std::string{};
+    };
+    require(positionValue() == "Top right", "Default minimap position is named");
+    for (int i = 0; i < 5; ++i) menu.action(action(UiAction::Left), s, nav);
+    require(positionValue() == "Top", "Arrow steps snap to named anchors");
+    menu.action(action(UiAction::Down), s, nav);
+    require(positionValue() == "50% , 10%", "Positions between anchors show percentages");
+    menu.settingsTab = MapMenu::ContentTab;
+    frame = menu.build(420, 280, s, nav);
+    auto coordinates = std::find_if(frame.buttons.begin(), frame.buttons.end(), [](auto const& b) { return b.action == UiAction::Coordinates; });
+    auto biome = std::find_if(frame.buttons.begin(), frame.buttons.end(), [](auto const& b) { return b.action == UiAction::Biome; });
+    require(coordinates != frame.buttons.end() && biome != frame.buttons.end() && coordinates->rect.y == biome->rect.y
+        && coordinates->rect.x < biome->rect.x && biome->toggle, "Related switches share one row");
+    menu.settingsTab = MapMenu::TerrainTab;
+    auto caveEnabled = [&] {
+        for (auto const& b : menu.build(420, 280, s, nav).buttons)
+            if (b.action == UiAction::CaveHeightUp) return b.enabled;
+        return false;
+    };
+    require(caveEnabled(), "Cave switch height is adjustable in automatic mode");
+    menu.action(action(UiAction::TerrainMode), s, nav);
+    require(s.terrainMode == "surface" && !caveEnabled(), "Manual terrain modes dim the unused switch height");
+    menu.action(action(UiAction::TerrainMode), s, nav); menu.action(action(UiAction::TerrainMode), s, nav);
+    s.minimapPositionX = 1; s.minimapPositionY = 0;
+    menu.locale = {};
     std::set<std::string_view> keys;
     for (auto const& t : translationCatalog()) {
         require(keys.insert(t.key).second, "Translation keys are unique");
@@ -811,7 +860,7 @@ void inspectionAndSlimeTests(TestDirectory const& dir) {
         "Slime menu switch requests immediate settings save");
     saveSettings(dir.path / "slime-settings", settings);
     require(loadSettings(dir.path / "slime-settings").showSlimeChunks, "Slime overlay preference persists");
-    menu.open(MapMenu::Page::Settings); menu.settingsTab = 1;
+    menu.open(MapMenu::Page::Settings); menu.settingsTab = MapMenu::ContentTab;
     bool found = false;
     for (int page = 0; page < 20; ++page) {
         auto frame = menu.build(420, 280, settings, navigation);

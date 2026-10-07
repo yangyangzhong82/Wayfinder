@@ -27,6 +27,17 @@ std::string keyName(int code) {
     if ((code >= 'A' && code <= 'Z') || (code >= '0' && code <= '9')) return std::string(1, static_cast<char>(code));
     return "VK " + std::to_string(code);
 }
+// Name the nine snap points reachable with the 10% arrow steps; anything else shows percentages.
+std::string minimapPosition(Settings const& s, Locale const& locale) {
+    int x = int(std::lround(s.minimapPositionX * 100)), y = int(std::lround(s.minimapPositionY * 100));
+    static char const* names[3][3]{
+        {"position.top_left", "position.top", "position.top_right"},
+        {"position.left", "position.center", "position.right"},
+        {"position.bottom_left", "position.bottom", "position.bottom_right"}};
+    auto anchor = [](int value) { return value == 0 ? 0 : value == 50 ? 1 : value == 100 ? 2 : -1; };
+    if (anchor(x) >= 0 && anchor(y) >= 0) return locale.tr(names[anchor(y)][anchor(x)]);
+    return std::to_string(x) + "% , " + std::to_string(y) + "%";
+}
 } // namespace
 void MapMenu::open(Page next) {
     page  = next;
@@ -158,7 +169,7 @@ int MapMenu::action(UiButton const& b, Settings& s, Navigation& nav) {
     if (b.action != UiAction::ClearTrail) confirmClearTrail = false;
     if (b.action == UiAction::SettingsTab) {
         cancelField();
-        settingsTab = std::clamp(static_cast<int>(b.id), 0, 2);
+        settingsTab = std::clamp(static_cast<int>(b.id), 0, SettingsTabCount - 1);
         offset = 0;
         return 0;
     }
@@ -563,6 +574,16 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         rows.push_back({{{}, locale.tr(key), UiAction::None}, {{}, "-", down}, {{}, "+", up}});
         rows.back().front().value = std::move(value);
     };
+    // Related switches share a row when there is room, halving the settings list.
+    bool twoColumns = panelWidth >= 240;
+    auto toggles = [&](std::string a, UiAction aa, bool av, std::string b, UiAction ba, bool bv) {
+        toggle(a, aa, av);
+        if (!twoColumns) return toggle(b, ba, bv);
+        auto first = rows.back().front();
+        rows.pop_back();
+        toggle(b, ba, bv);
+        rows.back().insert(rows.back().begin(), std::move(first));
+    };
     if (page == Page::Groups) {
         std::set<std::string> groups{std::string{}};
         for (auto const& point : nav.points) groups.insert(point.group);
@@ -693,37 +714,43 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         row(locale.tr("Jump to coordinates"), UiAction::LocateJump);
         row(locale.tr("Create waypoint here"), UiAction::LocateWaypoint);
         if (frame.message.empty()) frame.message = locale.tr("View only; does not teleport or load chunks.");
-    } else if (settingsTab == 0) {
+    } else if (settingsTab == MinimapTab) {
         toggle("Minimap", UiAction::ShowMap, s.showMinimap);
         stepper("Map size", std::to_string(int(s.minimapSize)), UiAction::SizeDown, UiAction::SizeUp);
         std::ostringstream zoom;
         zoom << std::fixed << std::setprecision(2) << (2.0 / s.minimapBlocksPerPixel) << "x";
         stepper("Minimap zoom", zoom.str(), UiAction::MinimapZoomOut, UiAction::MinimapZoomIn);
+        if (panelWidth >= 200) {
+            // One position row: the value names the screen anchor, arrows nudge by 10%.
+            rows.push_back({{{}, locale.tr("Position"), UiAction::None}, {{}, "\xe2\x86\x90", UiAction::Left},
+                {{}, "\xe2\x86\x92", UiAction::Right}, {{}, "\xe2\x86\x91", UiAction::Up}, {{}, "\xe2\x86\x93", UiAction::Down}});
+            rows.back().front().value = minimapPosition(s, locale);
+        } else {
+            stepper("Horizontal position", std::to_string(int(std::round(s.minimapPositionX * 100))) + "%", UiAction::Left, UiAction::Right);
+            stepper("Vertical position", std::to_string(int(std::round(s.minimapPositionY * 100))) + "%", UiAction::Up, UiAction::Down);
+        }
         stepper("Opacity", std::to_string(int(std::round(s.minimapOpacity * 100))) + "%", UiAction::OpacityDown, UiAction::OpacityUp);
         setting("Frame color", UiAction::FrameColor, locale.tr(minimapFrameColorNames[s.minimapFrameColor]));
         stepper("Info panel opacity", std::to_string(int(std::round(s.minimapInfoOpacity * 100))) + "%",
                 UiAction::InfoOpacityDown, UiAction::InfoOpacityUp);
-        stepper("Horizontal position", std::to_string(int(std::round(s.minimapPositionX * 100))) + "%", UiAction::Left, UiAction::Right);
-        stepper("Vertical position", std::to_string(int(std::round(s.minimapPositionY * 100))) + "%", UiAction::Up, UiAction::Down);
-        if (frame.message.empty()) frame.message = locale.tr("Position: left to right / top to bottom");
-    } else if (settingsTab == 1) {
-        toggle("Show nearby entities", UiAction::ShowEntities, s.showEntities);
-        row(locale.tr("Entity display / filter"), UiAction::Entities);
+    } else if (settingsTab == TerrainTab) {
         setting("Terrain mode", UiAction::TerrainMode, locale.tr("terrain." + s.terrainMode));
         stepper("Cave switch height", "Y " + std::to_string(s.caveSwitchY),
                 UiAction::CaveHeightDown, UiAction::CaveHeightUp);
-        toggle("Coordinates", UiAction::Coordinates, s.showCoordinates);
-        toggle("Show biome", UiAction::Biome, s.showBiome);
-        toggle("Biome regions", UiAction::BiomeRegions, s.showBiomeRegions);
+        // The threshold only drives Overworld automatic mode; dim it otherwise.
+        for (auto& b : rows.back()) b.enabled = s.terrainMode == "auto";
         toggle("Night and lighting", UiAction::Lighting, s.showLighting);
-        toggle("Show scale", UiAction::Scale, s.showScale);
-        toggle("Compass", UiAction::Compass, s.showCompass);
-        toggle("Chunk borders", UiAction::ChunkBorders, s.showChunkBorders);
-        toggle("Slime chunks", UiAction::SlimeChunks, s.showSlimeChunks);
-        toggle("Waypoints", UiAction::Waypoints, s.showWaypoints);
-        toggle("Target guidance", UiAction::Navigation, s.showNavigation);
-        toggle("Include water", UiAction::Water, s.includeWater);
-        toggle("Include leaves", UiAction::Leaves, s.includeLeaves);
+        toggles("Include water", UiAction::Water, s.includeWater, "Include leaves", UiAction::Leaves, s.includeLeaves);
+        if (frame.message.empty() && s.terrainMode == "auto")
+            frame.message = locale.tr("Auto: caves at or below the switch height");
+    } else if (settingsTab == ContentTab) {
+        toggles("Coordinates", UiAction::Coordinates, s.showCoordinates, "Show biome", UiAction::Biome, s.showBiome);
+        toggles("Show scale", UiAction::Scale, s.showScale, "Compass", UiAction::Compass, s.showCompass);
+        toggles("Waypoints", UiAction::Waypoints, s.showWaypoints, "Target guidance", UiAction::Navigation, s.showNavigation);
+        toggles("Chunk borders", UiAction::ChunkBorders, s.showChunkBorders, "Slime chunks", UiAction::SlimeChunks, s.showSlimeChunks);
+        toggle("Biome regions", UiAction::BiomeRegions, s.showBiomeRegions);
+        toggle("Show nearby entities", UiAction::ShowEntities, s.showEntities);
+        row(locale.tr("Entity display / filter"), UiAction::Entities);
     } else {
         setting("Language", UiAction::Language, locale.tr(s.language == "auto" ? "Follow game" : "language." + s.language));
         toggle("Record deaths", UiAction::Deaths, s.recordDeaths);
@@ -747,9 +774,9 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
     int pages = (rowCount + visibleRows - 1) / visibleRows;
     offset = std::clamp(offset, 0, std::max(0, rowCount - visibleRows));
     if (page == Page::Settings) {
-        static char const* tabs[]{"Appearance", "Map layers", "General"};
-        float w = (panelWidth - 20) / 3;
-        for (int i = 0; i < 3; ++i)
+        static char const* tabs[SettingsTabCount]{"Minimap", "Terrain", "Map content", "General"};
+        float w = (panelWidth - 12 - 4.0f * (SettingsTabCount - 1)) / float(SettingsTabCount);
+        for (int i = 0; i < SettingsTabCount; ++i)
             button({frame.panel.x + 6 + i * (w + 4), frame.panel.y + 23, w, 18},
                    locale.tr(tabs[i]), UiAction::SettingsTab, i, settingsTab == i);
     }
@@ -759,8 +786,8 @@ UiFrame MapMenu::build(float width, float height, Settings const& s, Navigation 
         float x = frame.panel.x + 6, y = frame.panel.y + contentTop + (i - offset) * rowStep;
         for (std::size_t j = 0; j < group.size(); ++j) {
             auto b = group[j];
-            // Keep labels and values together, with two compact adjustment buttons.
-            float cellWidth = group.size() == 3 ? (j == 0 ? panelWidth - 60 : 20) : w;
+            // Keep labels and values together, followed by compact adjustment buttons.
+            float cellWidth = group.size() >= 3 ? (j == 0 ? panelWidth - 12 - 24 * float(group.size() - 1) : 20) : w;
             b.rect = {x, y, cellWidth, rowHeight};
             frame.buttons.push_back(std::move(b));
             x += cellWidth + 4;

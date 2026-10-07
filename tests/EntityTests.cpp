@@ -107,7 +107,7 @@ void settingsTests(TestDirectory const& dir) {
 }
 void menuTests() {
     Settings s; MapMenu menu; Navigation nav;
-    menu.open(MapMenu::Page::Settings); menu.settingsTab = 1;
+    menu.open(MapMenu::Page::Settings); menu.settingsTab = MapMenu::ContentTab;
     auto frame = menu.build(420, 280, s, nav);
     for (auto type : {UiAction::Entities, UiAction::ShowEntities})
         require(std::any_of(frame.buttons.begin(), frame.buttons.end(), [&](auto const& b) { return b.action == type; }),
@@ -196,7 +196,7 @@ void menuTests() {
         menu.action(action(UiAction::Next), s, nav); frame = menu.build(112, 144, s, nav);
     }
     menu.action(action(UiAction::Back), s, nav);
-    require(menu.page == MapMenu::Page::Settings && menu.settingsTab == 1, "Back returns to the map-layer settings");
+    require(menu.page == MapMenu::Page::Settings && menu.settingsTab == MapMenu::ContentTab, "Back returns to the map content settings");
     auto builtins = entityTypeChoices({}, Settings{});
     for (auto const& type : builtins) require(entityTypeLabel(type, menu.locale) != type, "Built-in types have translated labels");
 }
