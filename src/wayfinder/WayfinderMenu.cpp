@@ -159,6 +159,9 @@ void Wayfinder::Impl::Menu::action(Impl& app, UiButton const& button) {
 
 void Wayfinder::Impl::Menu::openText(Impl& app) {
     if (!state.textField() || textInput.active() || !app.view.fullscreen) return;
+    // Actions run on mouse-down. Let the opening click finish before activating
+    // another window, otherwise its mouse-up can return focus to the game.
+    if (GetForegroundWindow() != app.input.mapWindow || (GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return;
     NativeTextInput::Request request;
     char const* label = state.focus == UiAction::Name ? "Name"
         : state.focus == UiAction::Group || state.focus == UiAction::BatchGroup ? "Group"
@@ -180,11 +183,13 @@ void Wayfinder::Impl::Menu::openText(Impl& app) {
         nativePage = state.page;
     } catch (std::exception const& ex) {
         state.cancelField();
-        state.fail(ex.what());
+        state.fail("Unable to open text editor");
+        app.mod.getLogger().warn("Wayfinder text input: {}", ex.what());
     }
 }
 
 void Wayfinder::Impl::Menu::pollText(Impl& app) {
+    if (!textInput.active()) openText(app);
     auto result = textInput.take();
     if (!result) return;
     auto field = nativeField;
@@ -192,7 +197,8 @@ void Wayfinder::Impl::Menu::pollText(Impl& app) {
     if (!app.view.fullscreen || field == UiAction::None || state.focus != field || state.page != nativePage) return;
     if (!result->error.empty()) {
         state.cancelField();
-        state.fail(result->error);
+        state.fail("Unable to open text editor");
+        app.mod.getLogger().warn("Wayfinder text input: {}", result->error);
         return;
     }
     if (!result->accepted) state.cancelField();

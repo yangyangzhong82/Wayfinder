@@ -2,6 +2,7 @@
 #include <CommCtrl.h>
 #include <imm.h>
 #include <algorithm>
+#include <condition_variable>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -9,6 +10,10 @@
 
 namespace wayfinder {
 namespace {
+[[noreturn]] void inputError(char const* operation) {
+    auto error = GetLastError();
+    throw std::runtime_error(std::string("Text editor: ") + operation + " failed (Win32 " + std::to_string(error) + ")");
+}
 std::wstring wide(std::string const& text) {
     if (text.empty()) return {};
     int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0);
@@ -57,34 +62,69 @@ struct DialogTemplate {
 } // namespace
 
 struct NativeTextInput::Impl {
+    static constexpr UINT checkFocusMessage = WM_APP + 1;
     Request request;
     std::mutex mutex;
+    std::condition_variable completed;
+    bool uiFinished{true};
     HWND window{};
     HWND edit{};
+    HHOOK inputHook{};
+    DWORD uiThread{};
+    static thread_local Impl* inputOwner;
     bool cancelled{};
     bool modeless{}, closing{};
     std::optional<Result> result;
     std::thread worker;
     // Accessed only by the UI thread.
-    bool composing{}, activated{};
+    bool composing{}, activated{}, focusCheckPending{};
     std::wstring value;
     Result outcome;
 
-    explicit Impl(Request input) : request(std::move(input)), value(wide(request.text)) {}
-    ~Impl() { cancel(); if (worker.joinable()) worker.join(); }
+    explicit Impl(Request input) : request(std::move(input)), modeless(request.owner != nullptr), value(wide(request.text)) {}
+    ~Impl() {
+        cancel();
+        if (worker.joinable()) worker.join();
+        if (modeless && GetCurrentThreadId() == uiThread) {
+            // Unload can run on the window thread itself; it cannot wait for
+            // that same thread to process our posted cancellation/startup.
+            if (edit) finishModeless(edit, false);
+            else {
+                MSG message{};
+                PeekMessageW(&message, nullptr, openMessage(), openMessage(), PM_REMOVE);
+            }
+        }
+        std::unique_lock lock(mutex);
+        completed.wait(lock, [&] { return uiFinished; });
+    }
     void cancel() {
         HWND target{};
-        bool isModeless{};
         {
             std::lock_guard lock(mutex);
             cancelled = true;
-            isModeless = modeless;
-            target = isModeless ? edit : window;
+            target = window;
         }
-        if (target) {
-            if (isModeless) SendMessageW(target, WM_CLOSE, 0, 0);
-            else PostMessageW(target, WM_CLOSE, 0, 0);
+        // Game callbacks may hold the map mutex. Never wait for the UI thread.
+        if (target) PostMessageW(target, WM_CLOSE, 0, 0);
+    }
+    void publish(Result next) {
+        std::lock_guard lock(mutex);
+        window = nullptr;
+        if (cancelled) next.accepted = false;
+        result = std::move(next);
+        uiFinished = true;
+        completed.notify_all();
+    }
+    void removeInputHook() {
+        if (inputHook) {
+            UnhookWindowsHookEx(inputHook);
+            inputHook = nullptr;
         }
+        if (inputOwner == this) inputOwner = nullptr;
+    }
+    static UINT openMessage() {
+        static UINT const message = RegisterWindowMessageW(L"Wayfinder.NativeTextInput.Open");
+        return message;
     }
     void finishModeless(HWND control, bool accepted) {
         if (!modeless || closing || control != edit) return;
@@ -102,14 +142,86 @@ struct NativeTextInput::Impl {
             next.error = ex.what();
             next.accepted = false;
         }
-        {
-            std::lock_guard lock(mutex);
-            result = std::move(next);
+        // Restore the game only when this editor still owns the foreground.
+        // Cancelling after Alt+Tab must not activate the game again.
+        auto foreground = GetForegroundWindow();
+        if (GetFocus() == control && (foreground == control || foreground == request.owner)) {
+            SetForegroundWindow(request.owner);
+            SetFocus(request.owner);
         }
         DestroyWindow(control);
+        // Publish only after focus callbacks and subclass cleanup have finished.
+        publish(std::move(next));
+    }
+    static LRESULT CALLBACK ownerProc(HWND owner, UINT msg, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR data) {
+        // The owned editor is part of the map. Suppress only the transfer
+        // between these two windows, including activation of the popup.
+        if ((msg == WM_KILLFOCUS || msg == WM_SETFOCUS) && w == data) return 0;
+        if (msg == WM_ACTIVATE && static_cast<DWORD_PTR>(l) == data) return 0;
+        if (msg == WM_SETCURSOR && LOWORD(l) == HTCLIENT) {
+            SetCursor(LoadCursorW(nullptr, w == data ? IDC_IBEAM : IDC_ARROW));
+            return TRUE;
+        }
+        if (msg == WM_NCDESTROY) RemoveWindowSubclass(owner, ownerProc, id);
+        return DefSubclassProc(owner, msg, w, l);
+    }
+    static LRESULT CALLBACK inputProc(int code, WPARAM w, LPARAM l) {
+        if (code == HC_ACTION && w == PM_REMOVE) {
+            auto& message = *reinterpret_cast<MSG*>(l);
+            if (message.message == openMessage()) {
+                auto self = reinterpret_cast<Impl*>(message.lParam);
+                message.hwnd = nullptr;
+                message.message = WM_NULL;
+                message.wParam = message.lParam = 0;
+                try {
+                    self->startModeless();
+                } catch (std::exception const& ex) {
+                    self->closing = true;
+                    if (self->edit) DestroyWindow(self->edit);
+                    self->edit = nullptr;
+                    self->removeInputHook();
+                    self->publish({false, {}, ex.what()});
+                }
+                return CallNextHookEx(nullptr, code, w, l);
+            }
+        }
+        auto self = inputOwner;
+        if (code == HC_ACTION && w == PM_REMOVE && self && self->edit) {
+            auto& message = *reinterpret_cast<MSG*>(l);
+            if (message.hwnd == self->edit) {
+                // The game pumps messages for its own input system, not a
+                // modeless EDIT. Translate and dispatch this editor's messages
+                // before that system can consume them (including IME/WM_CHAR).
+                auto input = message;
+                message.hwnd = nullptr;
+                message.message = WM_NULL;
+                message.wParam = message.lParam = 0;
+                TranslateMessage(&input);
+                DispatchMessageW(&input);
+            }
+        }
+        return CallNextHookEx(nullptr, code, w, l);
     }
     static LRESULT CALLBACK editProc(HWND edit, UINT msg, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR data) {
         auto& self = *reinterpret_cast<Impl*>(data);
+        if (self.modeless && msg == checkFocusMessage) {
+            self.focusCheckPending = false;
+            if (self.closing) return 0;
+            auto foreground = GetForegroundWindow();
+            if (foreground == self.request.owner || foreground == edit) {
+                // The game can reclaim focus while finishing the opening click.
+                // This is still the same editing session, not a cancellation.
+                SetActiveWindow(edit);
+                if (GetFocus() != edit) SetFocus(edit);
+            } else if (foreground && GetAncestor(foreground, GA_ROOTOWNER) != self.request.owner) {
+                self.finishModeless(edit, false);
+            }
+            return 0;
+        }
+        if (msg == WM_SETCURSOR) {
+            SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+            return TRUE;
+        }
         if (msg == WM_IME_STARTCOMPOSITION) self.composing = true;
         if (msg == WM_IME_ENDCOMPOSITION) self.composing = false;
         if (msg == WM_GETDLGCODE && self.composing)
@@ -130,17 +242,35 @@ struct NativeTextInput::Impl {
             self.finishModeless(edit, false);
             return 0;
         }
-        if (self.modeless && msg == WM_KILLFOCUS && !self.closing) {
-            self.finishModeless(edit, false);
-            return 0;
+        if (self.modeless && !self.closing && (msg == WM_KILLFOCUS
+            || (msg == WM_ACTIVATE && LOWORD(w) == WA_INACTIVE))) {
+            // Focus loss is also sent during activation and IME transitions.
+            // Recheck after the transition; never queue an unconditional close.
+            if (!self.focusCheckPending) {
+                self.focusCheckPending = PostMessageW(edit, checkFocusMessage, 0, 0) != FALSE;
+            }
         }
         if (msg == WM_KEYDOWN && w == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
             SendMessageW(edit, EM_SETSEL, 0, -1);
             return 0;
         }
         if (msg == WM_NCDESTROY) {
+            if (self.modeless) {
+                self.removeInputHook();
+                RemoveWindowSubclass(self.request.owner, ownerProc, reinterpret_cast<UINT_PTR>(&self));
+            }
             if (self.edit == edit) self.edit = nullptr;
+            {
+                std::lock_guard lock(self.mutex);
+                if (self.window == edit) self.window = nullptr;
+            }
             RemoveWindowSubclass(edit, editProc, id);
+            if (self.modeless && !self.closing) {
+                self.closing = true;
+                auto result = DefSubclassProc(edit, msg, w, l);
+                self.publish({});
+                return result;
+            }
         }
         return DefSubclassProc(edit, msg, w, l);
     }
@@ -230,40 +360,106 @@ struct NativeTextInput::Impl {
         if (cancelled) outcome.accepted = false;
         result = std::move(outcome);
     }
-    void startModeless() {
-        RECT client{};
-        if (!GetClientRect(request.owner, &client)) throw std::runtime_error("Unable to open text editor");
-        int width = std::clamp(client.right - client.left - 40, 220L, 420L);
-        int x = (client.right - client.left - width) / 2;
-        int y = (client.bottom - client.top - 24) / 2;
-        modeless = true;
-        edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", value.c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, x, y, width, 24,
-            request.owner, nullptr, GetModuleHandleW(nullptr), nullptr);
-        if (!edit) {
-            modeless = false;
-            throw std::runtime_error("Unable to open text editor");
+    void scheduleModeless() {
+        uiThread = GetWindowThreadProcessId(request.owner, nullptr);
+        if (!uiThread) inputError("GetWindowThreadProcessId");
+        if (!openMessage()) inputError("RegisterWindowMessageW");
+        HMODULE module{};
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&inputProc), &module)) inputError("GetModuleHandleExW");
+        inputHook = SetWindowsHookExW(WH_GETMESSAGE, inputProc, module, uiThread);
+        if (!inputHook) inputError("SetWindowsHookExW");
+        {
+            std::lock_guard lock(mutex);
+            uiFinished = false;
         }
+        if (!PostMessageW(request.owner, openMessage(), 0, reinterpret_cast<LPARAM>(this))) {
+            auto error = GetLastError();
+            removeInputHook();
+            std::lock_guard lock(mutex);
+            uiFinished = true;
+            SetLastError(error);
+            inputError("PostMessageW");
+        }
+    }
+    void startModeless() {
+        bool abort;
+        {
+            std::lock_guard lock(mutex);
+            abort = cancelled;
+        }
+        if (abort) {
+            removeInputHook();
+            publish({});
+            return;
+        }
+        RECT client{};
+        // Subclasses, focus and message dispatch must share the window thread.
+        if (inputOwner) throw std::runtime_error("Text editor: another editor owns this window thread");
+        if (GetWindowThreadProcessId(request.owner, nullptr) != GetCurrentThreadId())
+            throw std::runtime_error("Text editor: startup ran on the wrong window thread");
+        if (!GetClientRect(request.owner, &client)) inputError("GetClientRect");
+        int width = std::clamp(client.right - client.left - 40, 220L, 420L);
+        POINT position{(client.right - client.left - width) / 2, (client.bottom - client.top - 24) / 2};
+        if (!ClientToScreen(request.owner, &position)) inputError("ClientToScreen");
+        // Layered CHILD windows require Windows 8+ compatibility in the host
+        // EXE's manifest. An owned POPUP works without changing the game and
+        // is composed above DirectX. Keep it hidden until focus guards exist.
+        edit = CreateWindowExW(WS_EX_CLIENTEDGE | WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"EDIT", value.c_str(),
+            WS_POPUP | WS_TABSTOP | ES_AUTOHSCROLL, position.x, position.y, width, 24,
+            request.owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!edit) inputError("CreateWindowExW(EDIT popup)");
+        if (!SetLayeredWindowAttributes(edit, 0, 255, LWA_ALPHA))
+            inputError("SetLayeredWindowAttributes");
         SendMessageW(edit, EM_SETLIMITTEXT, 4096, 0);
         if (!SetWindowSubclass(edit, editProc, 1, reinterpret_cast<DWORD_PTR>(this))) {
-            DestroyWindow(edit);
-            edit = nullptr;
-            modeless = false;
-            throw std::runtime_error("Unable to open text editor");
+            inputError("SetWindowSubclass(editor)");
+        }
+        if (!SetWindowSubclass(request.owner, ownerProc, reinterpret_cast<UINT_PTR>(this),
+                reinterpret_cast<DWORD_PTR>(edit))) {
+            inputError("SetWindowSubclass(owner)");
+        }
+        inputOwner = this;
+        {
+            std::lock_guard lock(mutex);
+            window = edit;
+            abort = cancelled;
+        }
+        if (abort) {
+            finishModeless(edit, false);
+            return;
         }
         ImmAssociateContextEx(edit, nullptr, IACE_DEFAULT);
+        // A field can be opened inside the game's mouse-down callback.
+        // Release any outstanding native capture before the editor takes over.
+        if (GetCapture() == request.owner) ReleaseCapture();
+        if (!SetWindowPos(edit, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW))
+            inputError("SetWindowPos(editor)");
+        SetActiveWindow(edit);
         SetFocus(edit);
+        if (!edit || GetFocus() != edit) inputError("SetFocus(editor)");
+        ClipCursor(nullptr);
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
         SendMessageW(edit, EM_SETSEL, 0, -1);
     }
 };
+thread_local NativeTextInput::Impl* NativeTextInput::Impl::inputOwner{};
 NativeTextInput::NativeTextInput() = default;
 NativeTextInput::~NativeTextInput() = default;
 void NativeTextInput::start(Request request) {
     if (mImpl) throw std::runtime_error("Text editor is already open");
-    auto next = std::make_unique<Impl>(std::move(request));
-    if (next->request.owner && IsWindow(next->request.owner)) next->startModeless();
-    else next->worker = std::thread([self = next.get()] { self->run(); });
-    mImpl = std::move(next);
+    // Native focus/capture changes can re-enter the game input callbacks.
+    // Publish ownership first so those callbacks already treat this as editing.
+    mImpl = std::make_unique<Impl>(std::move(request));
+    try {
+        if (mImpl->request.owner) {
+            if (!IsWindow(mImpl->request.owner)) throw std::runtime_error("Text editor: game window is no longer valid");
+            mImpl->scheduleModeless();
+        } else mImpl->worker = std::thread([self = mImpl.get()] { self->run(); });
+    } catch (...) {
+        mImpl.reset();
+        throw;
+    }
 }
 bool NativeTextInput::active() const { return bool(mImpl); }
 void NativeTextInput::cancel() { if (mImpl) mImpl->cancel(); }

@@ -5,8 +5,9 @@
 #include <string>
 
 namespace wayfinder {
-// Windows owns editing, selection and IME composition. The UI worker exchanges
-// only strings/results; it never calls the game or a Wayfinder callback.
+// Windows owns editing, selection and IME composition. Owned popup fields are
+// created asynchronously on the owner's window thread; only results cross back
+// to game callbacks. Standalone dialogs use a separate UI worker.
 class NativeTextInput {
 public:
     struct Request {
