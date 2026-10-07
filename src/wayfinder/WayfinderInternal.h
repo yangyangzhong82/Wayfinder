@@ -3,12 +3,12 @@
 #include "wayfinder/Wayfinder.h"
 #include "wayfinder/ExplorationTrail.h"
 #include "wayfinder/EntityRadar.h"
-#include "wayfinder/MapArchive.h"
+#include "wayfinder/MapHistory.h"
 #include "wayfinder/MapMenu.h"
 #include "wayfinder/NativeTextInput.h"
 #include "wayfinder/MapMouse.h"
 #include "wayfinder/MapInspection.h"
-#include "wayfinder/MapRenderer.h"
+#include "wayfinder/WayfinderRendering.h"
 #include "wayfinder/RenderRecovery.h"
 #include "wayfinder/TerrainSampler.h"
 #include "wayfinder/WayfinderView.h"
@@ -44,59 +44,7 @@ struct Wayfinder::Impl {
         std::vector<EntityMarker> entities;
         Clock::time_point lastEntities{};
 
-        // One serial worker owns archive access. Captures are values/shared data only,
-        // never Impl, Session, an engine object, or a UI/renderer reference.
-        struct History {
-            struct PointRequest {
-                MapLayer layer;
-                int x{}, z{};
-            };
-            struct Result {
-                std::optional<MapView> view;
-                MapLayer layer;
-                std::uint64_t revision{};
-                std::vector<std::uint32_t> pixels;
-                BiomeMap biomes;
-                bool biomeRegions{};
-                MapLighting lighting;
-                std::optional<MapInspectionPoint> biomePoint;
-                std::string pointBiome;
-                std::optional<PointRequest> point;
-                MapCell pointCell;
-                std::unordered_map<MapLayer, MapBounds, MapLayerHash> bounds;
-                std::string error;
-                std::vector<std::string> warnings;
-                std::size_t rejected{};
-            };
-            struct OpenResult {
-                std::shared_ptr<MapArchive> archive;
-                std::vector<TileRecord> recent;
-                std::filesystem::path path;
-                std::string error;
-            };
-            std::shared_ptr<MapArchive> archive;
-            std::shared_ptr<std::vector<TileRecord>> inFlightChanges;
-            std::vector<TileRecord> retryChanges;
-            std::optional<MapView> requestedView;
-            MapLayer requestedLayer;
-            std::optional<PointRequest> requestedPoint;
-            std::optional<MapInspectionPoint> requestedBiome;
-            std::unordered_map<MapLayer, MapBounds, MapLayerHash> bounds;
-            std::filesystem::path savePath;
-            std::future<Result> saveTask;
-            std::future<OpenResult> openTask;
-            std::shared_ptr<ArchiveLoadProgress> progress;
-            std::size_t rejected{};
-            bool loadFailed{}, recovered{};
-            Clock::time_point lastSave{}, lastError{};
-
-            void start(Impl& app);
-            void finishOpen(Impl& app);
-            std::string status(Locale const& locale) const;
-            void finish(Impl& app);
-            void save(Impl& app, bool force);
-            bool ready() const;
-        } history;
+        MapHistory history;
 
         MapCache cache;
         TerrainSampler sampler;
@@ -116,14 +64,7 @@ struct Wayfinder::Impl {
         Clock::time_point lastNavigationAttempt{};
 
         explicit Session(std::size_t capacity) : cache(capacity) {}
-        void begin(Impl& app, IClientInstance& ci);
-        void end(Impl& app);
-        void persistNavigation(Impl& app);
-        void persistTrail(Impl& app, bool force);
-        void sampleEntities(Impl& app);
-        void tick(Impl& app, ll::event::ClientLevelTickEvent& event);
         void changed(ll::event::BlockChangedEvent& event);
-        void exit(Impl& app, ll::event::ClientExitLevelEvent& event);
     };
 
     struct Input {
@@ -136,14 +77,11 @@ struct Wayfinder::Impl {
         std::unordered_set<int> heldKeys, consumedKeys, consumedMouse, panKeys;
         Clock::time_point lastPan{};
 
-        void openMap(Impl& app);
-        void closeMap(Impl& app, bool grab);
-        void followPlayer(Impl& app);
-        void key(Impl& app, ll::event::KeyInputEvent& event);
-        void mouse(Impl& app, ll::event::MouseInputEvent& event);
-        void movePointer(Impl& app, float x, float y);
-        bool pollPointer(Impl& app);
-        void panHeldKeys(Impl& app);
+        void stopGesture() { pressedMarker = 0; panKeys.clear(); dragging = false; }
+        void clearKeys() { heldKeys.clear(); consumedKeys.clear(); consumedMouse.clear(); panKeys.clear(); }
+        void movePointer(WayfinderView& view, bool mapPage, float x, float y);
+        bool pollPointer(WayfinderView& view, bool mapPage);
+        void panHeldKeys(WayfinderView& view);
     };
 
     struct Menu {
@@ -155,34 +93,6 @@ struct Wayfinder::Impl {
         MapMenu::Page nativePage{MapMenu::Page::Map};
 
         void refreshLocale(Settings const& settings);
-        void refreshExploration(Impl& app);
-        void newWaypoint(Impl& app, bool atPointer);
-        void openContext(Impl& app);
-        void teleport(Impl& app);
-        void action(Impl& app, UiButton const& button);
-        void key(Impl& app, int code, bool first);
-        void openText(Impl& app);
-        void pollText(Impl& app);
-    };
-
-    struct Rendering {
-        std::unique_ptr<MapRenderer> renderer;
-        bool resetTexture{};
-        RenderRecovery recovery;
-        MapView renderedView; // Visible world rectangle shared by overlays and pointer projection.
-        MapView textureView;  // World rectangle of pixels, including the minimap border.
-        std::vector<std::uint32_t> pixels;
-        BiomeMap biomes;
-        bool rasterBiomes{};
-        MapLighting rasterLighting;
-        std::uint64_t imageRevision{}, rasterRevision{};
-        MapLayer rasterLayer{std::numeric_limits<int>::min()};
-        Clock::time_point lastRaster{};
-
-        void refreshImage(Impl& app, MapView const& view);
-        void render(Impl& app, ll::event::AfterUIRenderEvent& event);
-        bool draw(Impl& app, ll::event::AfterUIRenderEvent& event);
-        void notify(Impl& app, std::string_view message);
     };
 
     ll::mod::NativeMod& mod;
@@ -196,7 +106,42 @@ struct Wayfinder::Impl {
     Input input;
     WayfinderView view;
     Menu ui;
-    Rendering rendering;
+    WayfinderRendering rendering;
+    RenderRecovery renderRecovery;
+
+    // Cross-component workflows live here. Components receive only their explicit
+    // inputs; they never receive Impl or reach back into the enclosing runtime.
+    void beginSession(IClientInstance& client);
+    void endSession();
+    void tick(ll::event::ClientLevelTickEvent& event);
+    void exit(ll::event::ClientExitLevelEvent& event);
+    void persistNavigation();
+    void persistTrail(bool force);
+    void sampleEntities();
+    void collectHistory(bool force = false);
+    void saveHistory(bool force = false);
+    void applyHistory(MapHistory::Result result);
+    void invalidateDisplayedMap();
+    void followPlayer();
+    void selectDisplayedLayer(MapLayer layer);
+    void changeDimension(int dimension);
+    void changeLiveLayer(MapLayer layer);
+    void fitKnownArea();
+    void openMap();
+    void closeMap(bool grab);
+    void key(ll::event::KeyInputEvent& event);
+    void mouse(ll::event::MouseInputEvent& event);
+    void newWaypoint(bool atPointer);
+    void openContext();
+    void teleport();
+    void menuAction(UiButton const& button);
+    void menuKey(int code, bool first);
+    void refreshExploration();
+    void openText();
+    void pollText();
+    void render(ll::event::AfterUIRenderEvent& event);
+    bool drawFrame(ll::event::AfterUIRenderEvent& event);
+    void notifyRender(std::string_view message);
 
     explicit Impl(ll::mod::NativeMod& owner);
     static bool foreground();

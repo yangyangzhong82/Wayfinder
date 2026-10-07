@@ -15,7 +15,7 @@ template <class Function> void Wayfinder::Impl::guarded(Function&& function) {
             mod.getLogger().error("Wayfinder: {}", ex.what());
             lastError = Clock::now();
         }
-        input.closeMap(*this, false);
+        closeMap(false);
     }
 }
 
@@ -38,15 +38,15 @@ bool Wayfinder::enable() {
         mImpl->input.mapMouse = std::make_unique<MapMouse>();
         auto weak = weak_from_this();
         mImpl->subscribe<ll::event::ClientLevelTickEvent>(weak,
-                                                          [](Impl& app, auto& event) { app.session.tick(app, event); });
+                                                          [](Impl& app, auto& event) { app.tick(event); });
         mImpl->subscribe<ll::event::BlockChangedEvent>(weak,
                                                        [](Impl& app, auto& event) { app.session.changed(event); });
         mImpl->subscribe<ll::event::ClientExitLevelEvent>(weak,
-                                                          [](Impl& app, auto& event) { app.session.exit(app, event); });
-        mImpl->subscribe<ll::event::KeyInputEvent>(weak, [](Impl& app, auto& event) { app.input.key(app, event); });
-        mImpl->subscribe<ll::event::MouseInputEvent>(weak, [](Impl& app, auto& event) { app.input.mouse(app, event); });
+                                                          [](Impl& app, auto& event) { app.exit(event); });
+        mImpl->subscribe<ll::event::KeyInputEvent>(weak, [](Impl& app, auto& event) { app.key(event); });
+        mImpl->subscribe<ll::event::MouseInputEvent>(weak, [](Impl& app, auto& event) { app.mouse(event); });
         mImpl->subscribe<ll::event::AfterUIRenderEvent>(
-            weak, [](Impl& app, auto& event) { app.rendering.render(app, event); });
+            weak, [](Impl& app, auto& event) { app.render(event); });
         mImpl->mod.getLogger().info("Wayfinder enabled. World map key: {}; minimap key: {} (Windows VK codes).",
                                     mImpl->settings.fullMapKey, mImpl->settings.toggleMinimapKey);
         return true;
@@ -70,15 +70,15 @@ void Wayfinder::disable() {
         ll::event::EventBus::getInstance().removeListener(listener);
     std::unique_lock lock(mImpl->mutex);
     try {
-        mImpl->input.closeMap(*mImpl, true);
-        mImpl->session.end(*mImpl);
+        mImpl->closeMap(true);
+        mImpl->endSession();
     } catch (std::exception const& ex) {
         mImpl->mod.getLogger().error("Wayfinder shutdown: {}", ex.what());
         if (mImpl->input.mapMouse) mImpl->input.mapMouse->release();
         mImpl->session.client = nullptr;
     }
-    mImpl->session.history.finish(*mImpl);
-    mImpl->rendering.renderer.reset();
+    mImpl->collectHistory(true);
+    mImpl->rendering.shutdown();
     auto mapMouse = std::move(mImpl->input.mapMouse);
     lock.unlock();
     mImpl->ui.textInput.shutdown();

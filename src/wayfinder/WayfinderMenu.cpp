@@ -19,227 +19,218 @@ void Wayfinder::Impl::Menu::refreshLocale(Settings const& settings) {
     state.locale.select(settings.language, gameLanguage);
 }
 
-void Wayfinder::Impl::Menu::newWaypoint(Impl& app, bool atPointer) {
+void Wayfinder::Impl::newWaypoint(bool atPointer) {
     Waypoint point;
-    point.name = state.locale.tr("Waypoint");
-    point.dimension = app.session.player.dimension;
-    point.x = blockCoordinate(app.session.player.x);
-    point.y = blockCoordinate(app.session.player.y);
-    point.z = blockCoordinate(app.session.player.z);
+    point.name = ui.state.locale.tr("Waypoint");
+    point.dimension = session.player.dimension;
+    point.x = blockCoordinate(session.player.x);
+    point.y = blockCoordinate(session.player.y);
+    point.z = blockCoordinate(session.player.z);
     point.created = unixTime();
-    if (atPointer && app.input.hasMouse && app.view.area.contains(app.input.mouseX, app.input.mouseY)) {
-        point.dimension = app.view.displayedLayer(app.session.layer).dimension;
-        auto world = app.rendering.renderedView.worldAt(
-            (app.input.mouseX - app.view.area.x) / app.view.area.width * app.rendering.renderedView.width,
-            (app.input.mouseY - app.view.area.y) / app.view.area.height * app.rendering.renderedView.height);
+    if (atPointer && input.hasMouse && view.area.contains(input.mouseX, input.mouseY)) {
+        point.dimension = view.displayedLayer(session.layer).dimension;
+        auto world = rendering.displayedView().worldAt(
+            (input.mouseX - view.area.x) / view.area.width * rendering.displayedView().width,
+            (input.mouseY - view.area.y) / view.area.height * rendering.displayedView().height);
         point.x = blockCoordinate(world[0]);
         point.z = blockCoordinate(world[1]);
-        auto cell = app.session.cache.get(app.view.displayedLayer(app.session.layer), point.x, point.z);
+        auto cell = session.cache.get(view.displayedLayer(session.layer), point.x, point.z);
         point.y = cell.floor() ? std::optional<int>(cell.height) : std::nullopt;
     }
-    state.edit(std::move(point));
-    app.input.panKeys.clear();
-    app.input.dragging = false;
+    ui.state.edit(std::move(point));
+    input.panKeys.clear();
+    input.dragging = false;
 }
 
-void Wayfinder::Impl::Menu::action(Impl& app, UiButton const& button) {
-    app.input.panKeys.clear();
-    app.input.dragging = false;
-    refreshLocale(app.settings);
+void Wayfinder::Impl::menuAction(UiButton const& button) {
+    input.panKeys.clear();
+    input.dragging = false;
+    ui.refreshLocale(settings);
     if (!button.enabled) return;
-    if (button.action != UiAction::ClearTrail) state.confirmClearTrail = false;
-    if (button.action == UiAction::Explore) refreshExploration(app);
+    if (button.action != UiAction::ClearTrail) ui.state.confirmClearTrail = false;
+    if (button.action == UiAction::Explore) refreshExploration();
     if (button.action == UiAction::LiveLayer) {
-        app.input.followPlayer(app);
+        followPlayer();
         return;
     }
-    if (button.action == UiAction::SelectLayer && state.page == MapMenu::Page::Explore) {
-        if (button.id >= state.knownLayers.size()) return;
-        auto layer = state.knownLayers[static_cast<std::size_t>(button.id)];
-        app.view.selectLayer(layer);
-        auto found = app.session.history.bounds.find(layer);
-        app.view.fit(app.session.cache.bounds(layer), found == app.session.history.bounds.end()
-            ? std::nullopt : std::optional<MapBounds>(found->second));
-        app.session.history.requestedView.reset();
-        app.session.history.requestedPoint.reset();
-        app.rendering.pixels.clear();
-        app.input.pressedMarker = 0;
-        state.open(MapMenu::Page::Map);
+    if (button.action == UiAction::SelectLayer && ui.state.page == MapMenu::Page::Explore) {
+        if (button.id >= ui.state.knownLayers.size()) return;
+        selectDisplayedLayer(ui.state.knownLayers[static_cast<std::size_t>(button.id)]);
         return;
     }
-    if (button.action == UiAction::Retrace && state.page == MapMenu::Page::Explore) {
-        if (app.session.trail.retraceIndex()) app.session.trail.stopRetrace();
-        else if (!app.session.trail.startRetrace(app.session.layer, app.session.player.x,
-                     app.session.player.y, app.session.player.z)) {
-            state.fail("No nearby continuous trail in this layer.");
+    if (button.action == UiAction::Retrace && ui.state.page == MapMenu::Page::Explore) {
+        if (session.trail.retraceIndex()) session.trail.stopRetrace();
+        else if (!session.trail.startRetrace(session.layer, session.player.x,
+                     session.player.y, session.player.z)) {
+            ui.state.fail("No nearby continuous trail in this layer.");
             return;
         }
-        app.input.followPlayer(app);
+        followPlayer();
         return;
     }
-    if (button.action == UiAction::ClearTrail && state.page == MapMenu::Page::Explore) {
-        if (!state.confirmClearTrail) { state.confirmClearTrail = true; return; }
-        app.session.trail.clear();
-        app.session.persistTrail(app, true);
-        state.confirmClearTrail = false;
-        state.message = app.session.trailSaveFailed ? "Trail save failed; retrying" : "Trail cleared";
-        refreshExploration(app);
+    if (button.action == UiAction::ClearTrail && ui.state.page == MapMenu::Page::Explore) {
+        if (!ui.state.confirmClearTrail) { ui.state.confirmClearTrail = true; return; }
+        session.trail.clear();
+        persistTrail(true);
+        ui.state.confirmClearTrail = false;
+        ui.state.message = session.trailSaveFailed ? "Trail save failed; retrying" : "Trail cleared";
+        refreshExploration();
         return;
     }
     if (button.action == UiAction::NewPlayer) {
-        newWaypoint(app, false);
+        newWaypoint(false);
         return;
     }
     if (button.action == UiAction::Follow) {
-        app.input.followPlayer(app);
+        followPlayer();
         return;
     }
     if (button.action == UiAction::Locate) {
-        state.open(MapMenu::Page::Locate);
-        state.draft = {};
-        state.draft.name = state.locale.tr("Waypoint");
-        state.draft.dimension = app.view.displayedLayer(app.session.layer).dimension;
-        state.draft.x = blockCoordinate(app.session.player.x);
-        state.draft.z = blockCoordinate(app.session.player.z);
-        state.draft.created = unixTime();
+        ui.state.open(MapMenu::Page::Locate);
+        ui.state.draft = {};
+        ui.state.draft.name = ui.state.locale.tr("Waypoint");
+        ui.state.draft.dimension = view.displayedLayer(session.layer).dimension;
+        ui.state.draft.x = blockCoordinate(session.player.x);
+        ui.state.draft.z = blockCoordinate(session.player.z);
+        ui.state.draft.created = unixTime();
         return;
     }
-    auto previousMenu = state;
+    auto previousMenu = ui.state;
     try {
         if (button.action == UiAction::Teleport) {
-            if (state.page == MapMenu::Page::Context && button.enabled) teleport(app);
+            if (ui.state.page == MapMenu::Page::Context && button.enabled) teleport();
             return;
         }
-        auto changedSettings = app.settings;
-        auto changedNavigation = app.session.navigation;
-        int change = state.action(button, changedSettings, changedNavigation);
+        auto changedSettings = settings;
+        auto changedNavigation = session.navigation;
+        int change = ui.state.action(button, changedSettings, changedNavigation);
         if (change == 1) {
-            writeNavigation(app.session.navigationPath, app.session.identity, changedNavigation);
-            app.session.navigation = std::move(changedNavigation);
-            app.session.navigationDirty = false;
+            writeNavigation(session.navigationPath, session.identity, changedNavigation);
+            session.navigation = std::move(changedNavigation);
+            session.navigationDirty = false;
             if (button.action == UiAction::Navigate || button.action == UiAction::NavigateExisting || button.action == UiAction::Stop)
-                app.session.trail.stopRetrace();
+                session.trail.stopRetrace();
         } else if (change == 2) {
-            saveSettings(app.mod.getConfigDir(), changedSettings);
-            bool resample = app.settings.includeWater != changedSettings.includeWater
-                || app.settings.terrainMode != changedSettings.terrainMode
-                || app.settings.caveSwitchY != changedSettings.caveSwitchY
-                || app.settings.includeLeaves != changedSettings.includeLeaves
-                || app.settings.sampleRadiusChunks != changedSettings.sampleRadiusChunks;
-            bool resize = app.settings.minimapPixels != changedSettings.minimapPixels
-                || app.settings.fullscreenPixels != changedSettings.fullscreenPixels
-                || app.settings.terrainPixelScale != changedSettings.terrainPixelScale
-                || app.settings.minimapBlocksPerPixel != changedSettings.minimapBlocksPerPixel;
-            app.settings = changedSettings;
-            if (!app.settings.recordTrail) app.session.trail.breakSegment();
-            app.session.lastEntities = {};
-            if (!app.settings.showEntities) app.session.entities.clear();
-            if (resample) app.session.sampler.reset();
-            if (resize) app.rendering.pixels.clear();
-            state.locale.select(app.settings.language, gameLanguage);
+            saveSettings(mod.getConfigDir(), changedSettings);
+            bool resample = settings.includeWater != changedSettings.includeWater
+                || settings.terrainMode != changedSettings.terrainMode
+                || settings.caveSwitchY != changedSettings.caveSwitchY
+                || settings.includeLeaves != changedSettings.includeLeaves
+                || settings.sampleRadiusChunks != changedSettings.sampleRadiusChunks;
+            bool resize = settings.minimapPixels != changedSettings.minimapPixels
+                || settings.fullscreenPixels != changedSettings.fullscreenPixels
+                || settings.terrainPixelScale != changedSettings.terrainPixelScale
+                || settings.minimapBlocksPerPixel != changedSettings.minimapBlocksPerPixel;
+            settings = changedSettings;
+            if (!settings.recordTrail) session.trail.breakSegment();
+            session.lastEntities = {};
+            if (!settings.showEntities) session.entities.clear();
+            if (resample) session.sampler.reset();
+            if (resize) rendering.invalidate();
+            ui.state.locale.select(settings.language, ui.gameLanguage);
         } else if (change == 3 || change == 4) {
-            auto point = state.draft;
-            locateView(app.view.fullView, point.x, point.z);
-            app.view.following = false;
-            app.rendering.pixels.clear();
+            auto point = ui.state.draft;
+            locateView(view.fullView, point.x, point.z);
+            view.following = false;
+            invalidateDisplayedMap();
             if (change == 4) {
-                auto cell = app.session.cache.get(app.view.displayedLayer(app.session.layer), point.x, point.z);
+                auto cell = session.cache.get(view.displayedLayer(session.layer), point.x, point.z);
                 if (!point.y) point.y = cell.floor() ? std::optional<int>(cell.height) : std::nullopt;
-                state.edit(std::move(point));
-            } else state.open(MapMenu::Page::Map);
+                ui.state.edit(std::move(point));
+            } else ui.state.open(MapMenu::Page::Map);
         }
     } catch (std::exception const& ex) {
-        state = std::move(previousMenu);
-        state.fail(ex.what());
-        app.mod.getLogger().warn("Wayfinder UI: {}", ex.what());
+        ui.state = std::move(previousMenu);
+        ui.state.fail(ex.what());
+        mod.getLogger().warn("Wayfinder UI: {}", ex.what());
     }
-    frame = state.build(app.view.guiWidth, app.view.guiHeight, app.settings, app.session.navigation);
-    if (state.textField()) openText(app);
+    ui.frame = ui.state.build(view.guiWidth, view.guiHeight, settings, session.navigation);
+    if (ui.state.textField()) openText();
 }
 
-void Wayfinder::Impl::Menu::openText(Impl& app) {
-    if (!state.textField() || textInput.active() || !app.view.fullscreen) return;
+void Wayfinder::Impl::openText() {
+    if (!ui.state.textField() || ui.textInput.active() || !view.fullscreen) return;
     // Actions run on mouse-down. Let the opening click finish before activating
     // another window, otherwise its mouse-up can return focus to the game.
-    if (GetForegroundWindow() != app.input.mapWindow || (GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return;
+    if (GetForegroundWindow() != input.mapWindow || (GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return;
     NativeTextInput::Request request;
-    char const* label = state.focus == UiAction::Name ? "Name"
-        : state.focus == UiAction::Group || state.focus == UiAction::BatchGroup ? "Group"
-        : state.focus == UiAction::Search || state.focus == UiAction::EntitySearch ? "Search"
+    char const* label = ui.state.focus == UiAction::Name ? "Name"
+        : ui.state.focus == UiAction::Group || ui.state.focus == UiAction::BatchGroup ? "Group"
+        : ui.state.focus == UiAction::Search || ui.state.focus == UiAction::EntitySearch ? "Search"
         : "Coordinates";
-    request.title = "Wayfinder - " + state.locale.tr(label);
-    request.text = state.text;
-    bool coordinates = state.focus == UiAction::CoordinateText || state.focus == UiAction::X
-        || state.focus == UiAction::Y || state.focus == UiAction::Z;
-    request.hint = state.errorMessage ? state.locale.error(state.message)
-        : state.locale.tr(coordinates ? "Coordinate input hint" : "Native text input hint");
-    request.accept = state.locale.tr("Done");
-    request.cancel = state.locale.tr("Cancel");
-    GetWindowRect(app.input.mapWindow, &request.anchor);
-    request.owner = app.input.mapWindow;
+    request.title = "Wayfinder - " + ui.state.locale.tr(label);
+    request.text = ui.state.text;
+    bool coordinates = ui.state.focus == UiAction::CoordinateText || ui.state.focus == UiAction::X
+        || ui.state.focus == UiAction::Y || ui.state.focus == UiAction::Z;
+    request.hint = ui.state.errorMessage ? ui.state.locale.error(ui.state.message)
+        : ui.state.locale.tr(coordinates ? "Coordinate input hint" : "Native text input hint");
+    request.accept = ui.state.locale.tr("Done");
+    request.cancel = ui.state.locale.tr("Cancel");
+    GetWindowRect(input.mapWindow, &request.anchor);
+    request.owner = input.mapWindow;
     try {
-        textInput.start(std::move(request));
-        nativeField = state.focus;
-        nativePage = state.page;
+        ui.textInput.start(std::move(request));
+        ui.nativeField = ui.state.focus;
+        ui.nativePage = ui.state.page;
     } catch (std::exception const& ex) {
-        state.cancelField();
-        state.fail("Unable to open text editor");
-        app.mod.getLogger().warn("Wayfinder text input: {}", ex.what());
+        ui.state.cancelField();
+        ui.state.fail("Unable to open text editor");
+        mod.getLogger().warn("Wayfinder text input: {}", ex.what());
     }
 }
 
-void Wayfinder::Impl::Menu::pollText(Impl& app) {
-    if (!textInput.active()) openText(app);
-    auto result = textInput.take();
+void Wayfinder::Impl::pollText() {
+    if (!ui.textInput.active()) openText();
+    auto result = ui.textInput.take();
     if (!result) return;
-    auto field = nativeField;
-    nativeField = UiAction::None;
-    if (!app.view.fullscreen || field == UiAction::None || state.focus != field || state.page != nativePage) return;
+    auto field = ui.nativeField;
+    ui.nativeField = UiAction::None;
+    if (!view.fullscreen || field == UiAction::None || ui.state.focus != field || ui.state.page != ui.nativePage) return;
     if (!result->error.empty()) {
-        state.cancelField();
-        state.fail("Unable to open text editor");
-        app.mod.getLogger().warn("Wayfinder text input: {}", result->error);
+        ui.state.cancelField();
+        ui.state.fail("Unable to open text editor");
+        mod.getLogger().warn("Wayfinder text input: {}", result->error);
         return;
     }
-    if (!result->accepted) state.cancelField();
+    if (!result->accepted) ui.state.cancelField();
     else {
-        state.text = std::move(result->text);
+        ui.state.text = std::move(result->text);
         try {
-            state.commitField();
-            state.message.clear();
-            state.errorMessage = false;
+            ui.state.commitField();
+            ui.state.message.clear();
+            ui.state.errorMessage = false;
         } catch (std::exception const& ex) {
-            state.fail(ex.what());
-            openText(app);
+            ui.state.fail(ex.what());
+            openText();
         }
     }
-    frame = state.build(app.view.guiWidth, app.view.guiHeight, app.settings, app.session.navigation);
+    ui.frame = ui.state.build(view.guiWidth, view.guiHeight, settings, session.navigation);
 }
 
-void Wayfinder::Impl::Menu::openContext(Impl& app) {
-    if (!app.input.hasMouse || !app.view.area.contains(app.input.mouseX, app.input.mouseY)) return;
-    refreshLocale(app.settings);
+void Wayfinder::Impl::openContext() {
+    if (!input.hasMouse || !view.area.contains(input.mouseX, input.mouseY)) return;
+    ui.refreshLocale(settings);
     // Resolve once, before the pointer moves onto a menu action.
-    newWaypoint(app, true);
-    state.context(state.draft, app.input.mouseX, app.input.mouseY);
-    state.contextCanTeleport = state.draft.dimension == app.session.player.dimension;
-    app.input.pressedMarker = 0;
-    auto& history = app.session.history;
-    history.requestedPoint.reset();
-    if (!state.draft.y && (history.archive || history.openTask.valid())) {
-        history.requestedPoint = Session::History::PointRequest{app.view.displayedLayer(app.session.layer), state.draft.x, state.draft.z};
-        state.contextLoading = true;
-        history.save(app, false);
+    newWaypoint(true);
+    ui.state.context(ui.state.draft, input.mouseX, input.mouseY);
+    ui.state.contextCanTeleport = ui.state.draft.dimension == session.player.dimension;
+    input.pressedMarker = 0;
+    auto& history = session.history;
+    history.cancelPoint();
+    if (!ui.state.draft.y && history.available()) {
+        history.requestPoint({view.displayedLayer(session.layer), ui.state.draft.x, ui.state.draft.z});
+        ui.state.contextLoading = true;
+        saveHistory();
     }
 }
 
-void Wayfinder::Impl::Menu::teleport(Impl& app) {
-    auto client = app.session.client;
+void Wayfinder::Impl::teleport() {
+    auto client = session.client;
     auto player = client ? client->getLocalPlayer() : nullptr;
     if (!player || !player->isAlive()) throw std::runtime_error("Teleport unavailable while not in game.");
     if (!client->hasCommands() || player->getCommandPermissionLevel() < CommandPermissionLevel::GameDirectors)
         throw std::runtime_error("Teleport requires cheats and command permission.");
-    auto point = state.draft;
+    auto point = ui.state.draft;
     int dimension = static_cast<int>(player->getDimensionId());
     // Validate before any world query, including a stale menu after dimension changes.
     teleportCommand(point, dimension);
@@ -247,9 +238,9 @@ void Wayfinder::Impl::Menu::teleport(Impl& app) {
         auto chunk = source->getChunk(floorDiv(point.x, 16), floorDiv(point.z, 16));
         if (chunk && chunk->mLoadState->load(std::memory_order_acquire) == ChunkState::Loaded) {
             // Refresh the selected layer, never the roof above a cave/Nether map.
-            auto settings = app.settings;
-            settings.includeWater = settings.includeLeaves = true;
-            auto cell = TerrainSampler::sample(*source, app.view.displayedLayer(app.session.layer), point.x, point.z, settings);
+            auto sampleSettings = settings;
+            sampleSettings.includeWater = sampleSettings.includeLeaves = true;
+            auto cell = TerrainSampler::sample(*source, view.displayedLayer(session.layer), point.x, point.z, sampleSettings);
             if (!cell || !cell->floor() || cell->height + 1 >= source->getMaxHeight())
                 throw std::runtime_error("No valid surface at this location.");
             point.y = cell->height;
@@ -259,51 +250,51 @@ void Wayfinder::Impl::Menu::teleport(Impl& app) {
         std::make_unique<PlayerCommandOrigin>(player->getLevel(), player->getOrCreateUniqueID()),
         static_cast<int>(CurrentCmdVersion::Latest));
     CommandRequestPacket request(CommandRequestPacketPayload(context, false));
-    app.session.trail.stopRetrace();
+    session.trail.stopRetrace();
     player->sendNetworkPacket(request);
     // Server command feedback stays visible in the HUD, including rejected requests.
-    app.input.closeMap(app, true);
+    closeMap(true);
 }
 
-void Wayfinder::Impl::Menu::key(Impl& app, int code, bool first) {
+void Wayfinder::Impl::menuKey(int code, bool first) {
     try {
         if (code == VK_ESCAPE) {
             if (!first) return;
-            if (state.focus != UiAction::None) state.cancelField();
-            else state.open(state.page == MapMenu::Page::Entities ? MapMenu::Page::Settings : MapMenu::Page::Map);
+            if (ui.state.focus != UiAction::None) ui.state.cancelField();
+            else ui.state.open(ui.state.page == MapMenu::Page::Entities ? MapMenu::Page::Settings : MapMenu::Page::Map);
             return;
         }
-        if (state.focus == UiAction::MapKey || state.focus == UiAction::ToggleKey
-            || state.focus == UiAction::ZoomInKey || state.focus == UiAction::ZoomOutKey) {
+        if (ui.state.focus == UiAction::MapKey || ui.state.focus == UiAction::ToggleKey
+            || ui.state.focus == UiAction::ZoomInKey || ui.state.focus == UiAction::ZoomOutKey) {
             if (!first) return;
-            bool zoomKey = state.focus == UiAction::ZoomInKey || state.focus == UiAction::ZoomOutKey;
+            bool zoomKey = ui.state.focus == UiAction::ZoomInKey || ui.state.focus == UiAction::ZoomOutKey;
             if (!(zoomKey ? bindableZoomKey(code) : bindableMapKey(code))) {
-                state.message = zoomKey ? "Press a zoom key (+/- allowed); Esc cancels"
+                ui.state.message = zoomKey ? "Press a zoom key (+/- allowed); Esc cancels"
                                         : "Use a letter/number/F1-F12 (WASD/F reserved)";
                 return;
             }
-            auto changed = app.settings;
-            if (state.focus == UiAction::MapKey) changed.fullMapKey = code;
-            else if (state.focus == UiAction::ToggleKey) changed.toggleMinimapKey = code;
-            else if (state.focus == UiAction::ZoomInKey) changed.minimapZoomInKey = code;
+            auto changed = settings;
+            if (ui.state.focus == UiAction::MapKey) changed.fullMapKey = code;
+            else if (ui.state.focus == UiAction::ToggleKey) changed.toggleMinimapKey = code;
+            else if (ui.state.focus == UiAction::ZoomInKey) changed.minimapZoomInKey = code;
             else changed.minimapZoomOutKey = code;
-            saveSettings(app.mod.getConfigDir(), changed);
-            app.settings = changed;
-            state.cancelField();
-            state.message = "Key saved";
+            saveSettings(mod.getConfigDir(), changed);
+            settings = changed;
+            ui.state.cancelField();
+            ui.state.message = "Key saved";
             return;
         }
-        if (state.focus == UiAction::None) {
-            if (first && code == VK_PRIOR) state.scroll(-1);
-            if (first && code == VK_NEXT) state.scroll(1);
+        if (ui.state.focus == UiAction::None) {
+            if (first && code == VK_PRIOR) ui.state.scroll(-1);
+            if (first && code == VK_NEXT) ui.state.scroll(1);
             return;
         }
-        if (state.textField()) { openText(app); return; }
+        if (ui.state.textField()) { openText(); return; }
     } catch (std::exception const& ex) {
-        state.fail(ex.what());
-        app.mod.getLogger().warn("Wayfinder UI: {}", ex.what());
+        ui.state.fail(ex.what());
+        mod.getLogger().warn("Wayfinder UI: {}", ex.what());
     }
-    frame = state.build(app.view.guiWidth, app.view.guiHeight, app.settings, app.session.navigation);
+    ui.frame = ui.state.build(view.guiWidth, view.guiHeight, settings, session.navigation);
 }
 
 } // namespace wayfinder
