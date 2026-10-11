@@ -279,7 +279,10 @@ bool MapRenderer::render(
             auto composited = pixels;
             if (settings.showBiomeRegions) overlayBiomes(composited, textureView, biomes);
             if (slimeVisible) overlaySlimeChunks(composited, textureView, layer);
-            if (settings.showTrail) overlayTrail(composited, textureView, layer, trail.points, settings.terrainPixelScale);
+            if (settings.showTrail) {
+                int density = std::clamp(static_cast<int>(std::round(view.blocksPerPixel / textureView.blocksPerPixel)), 1, 4);
+                overlayTrail(composited, textureView, layer, trail.points, density);
+            }
             std::memcpy(image.mImageBytes.data(), composited.data(), image.mImageBytes.size());
         } else std::memcpy(image.mImageBytes.data(), pixels.data(), image.mImageBytes.size());
         cg::ImageBuffer buffer(std::move(image));

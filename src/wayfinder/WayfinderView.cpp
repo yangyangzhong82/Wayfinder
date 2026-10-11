@@ -1,13 +1,35 @@
 #include "wayfinder/WayfinderView.h"
 
 namespace wayfinder {
+namespace {
+MapView limitTexturePixels(MapView view, std::size_t limit) {
+    auto count = static_cast<std::size_t>(view.width) * view.height;
+    if (count <= limit) return view;
+    double factor = std::sqrt(double(count) / limit);
+    int width, height;
+    do {
+        width = static_cast<int>(std::ceil(view.width / factor));
+        height = static_cast<int>(std::ceil(view.height / factor));
+        if (static_cast<std::size_t>(width) * height <= limit) break;
+        factor *= 1.01;
+    } while (true);
+    // Round outwards and crop with UVs: the logical world rectangle never shrinks.
+    view.width = width;
+    view.height = height;
+    view.blocksPerPixel *= factor;
+    return view;
+}
+} // namespace
+
 MapView detailTextureView(MapView visible, int pixelScale) {
     pixelScale = std::clamp(pixelScale, 2, 4);
     visible.width *= pixelScale;
     visible.height *= pixelScale;
     visible.blocksPerPixel /= pixelScale;
-    return visible;
+    return limitTexturePixels(visible, maxTerrainPixels);
 }
+
+MapView previewTextureView(MapView texture) { return limitTexturePixels(texture, 128 * 128); }
 
 MapView minimapTextureView(MapView visible) {
     // Leave room for motion between async updates, plus a texel for filtering.

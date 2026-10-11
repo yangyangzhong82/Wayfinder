@@ -5,7 +5,9 @@
 namespace wayfinder {
 // Keep navigation/zoom in logical pixels; raster density is independent of world coverage.
 inline constexpr int terrainPixelScale = 2;
+inline constexpr std::size_t maxTerrainPixels = 2 * 1024 * 1024;
 MapView detailTextureView(MapView visible, int pixelScale = terrainPixelScale);
+MapView previewTextureView(MapView texture);
 // Raster data stays on a stable texel grid; the visible minimap moves inside it.
 MapView minimapTextureView(MapView visible);
 bool textureCoversView(MapView const& texture, MapView const& visible, double marginPixels = 0);

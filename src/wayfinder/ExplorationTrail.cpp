@@ -118,10 +118,14 @@ void overlayTrail(std::span<std::uint32_t> pixels, MapView const& view, MapLayer
                   std::span<TrailPoint const> points, int pixelScale) {
     if (view.width <= 0 || view.height <= 0 || pixels.size() != static_cast<std::size_t>(view.width) * view.height) return;
     // Trace in logical pixels so denser terrain does not make the trail thinner.
-    if (pixelScale < 1 || pixelScale > 4 || view.width % pixelScale || view.height % pixelScale) return;
+    if (pixelScale < 1 || pixelScale > 4) return;
     auto logical = view;
-    logical.width /= pixelScale;
-    logical.height /= pixelScale;
+    logical.width = (view.width + pixelScale - 1) / pixelScale;
+    logical.height = (view.height + pixelScale - 1) / pixelScale;
+    // Pixel-limited textures can have odd dimensions. Pad only the east/south edges,
+    // keeping the world origin aligned, and clip writes to the real texture below.
+    logical.centerX += (logical.width * pixelScale - view.width) * view.blocksPerPixel * 0.5;
+    logical.centerZ += (logical.height * pixelScale - view.height) * view.blocksPerPixel * 0.5;
     logical.blocksPerPixel *= pixelScale;
     MapRect area{0, 0, float(logical.width), float(logical.height)};
     int budget = 65536;
@@ -139,6 +143,7 @@ void overlayTrail(std::span<std::uint32_t> pixels, MapView const& view, MapLayer
         // Integer stepping prevents floating-point rounding from skipping individual pixels.
         while (budget > 0) {
             for (int dz = 0; dz < pixelScale; ++dz) for (int dx = 0; dx < pixelScale; ++dx) {
+                if (x * pixelScale + dx >= view.width || y * pixelScale + dz >= view.height) continue;
                 auto& pixel = pixels[static_cast<std::size_t>(y * pixelScale + dz) * view.width + x * pixelScale + dx];
                 pixel = rgba(((pixel & 255) + 170) / 3, (((pixel >> 8) & 255) + 420) / 3,
                              (((pixel >> 16) & 255) + 460) / 3);

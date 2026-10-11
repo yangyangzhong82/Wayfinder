@@ -7,26 +7,51 @@ std::optional<MapView> WayfinderRendering::refreshImage(MapView const& view, Map
     bool smooth = !fullscreen;
     auto request = detailTextureView(smooth ? minimapTextureView(view) : view, settings.terrainPixelScale);
     MapLighting lighting{settings.showLighting, layer.dimension == 0 ? overworldSkyDarken : 0};
-    bool urgent = pixels.empty() || textureView.width != request.width || textureView.height != request.height ||
-                  textureView.blocksPerPixel != request.blocksPerPixel ||
+    if (liveTask.valid() && liveTask.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto result = liveTask.get();
+        if (liveOnly && result.generation == generation && result.layer == layer && result.lighting == lighting
+            && result.biomeRegions == settings.showBiomeRegions && result.view.width == request.width
+            && result.view.height == request.height && result.view.blocksPerPixel == request.blocksPerPixel
+            && (fullscreen || textureCoversView(result.view, view, settings.terrainPixelScale)))
+            acceptImage(result.view, result.layer, result.revision, std::move(result.pixels), std::move(result.biomes),
+                        result.biomeRegions, result.lighting);
+    }
+    if (!liveOnly && !liveTask.valid()) liveBuffer.reset();
+    bool urgent = pixels.empty() || rasterTarget.width != request.width || rasterTarget.height != request.height ||
+                  rasterTarget.blocksPerPixel != request.blocksPerPixel ||
                   rasterLayer != layer || rasterBiomes != settings.showBiomeRegions ||
-                  (smooth && !textureCoversView(textureView, view, settings.terrainPixelScale));
-    if (urgent || (liveOnly && (rasterRevision != cache.revision() || rasterLighting != lighting) &&
-                   Clock::now() - lastRaster >= std::chrono::milliseconds(settings.refreshMilliseconds))) {
-        // Teleports or a slow worker may exhaust the border. Rebuild locally
-        // before drawing instead of clamping UVs and stretching an edge texel.
-        pixels = cache.rasterize(layer, request, lighting);
+                  (smooth && !textureCoversView(textureView, view, 1));
+    if (urgent) {
+        // Keep urgent UI work bounded even while history is opening or its worker is busy.
+        // The preview has the same world coverage; detailed material/biome work stays off-thread.
+        textureView = previewTextureView(request);
+        cache.preview(layer, textureView, lighting, pixels);
         rasterLighting = lighting;
-        biomes = settings.showBiomeRegions ? rasterizeBiomes(cache, layer, request) : BiomeMap{};
+        biomes = {};
         rasterBiomes = settings.showBiomeRegions;
-        textureView = request;
+        rasterTarget = request;
         rasterLayer = layer;
-        rasterRevision = liveOnly ? cache.revision() : std::numeric_limits<std::uint64_t>::max();
+        rasterRevision = std::numeric_limits<std::uint64_t>::max();
         ++imageRevision;
-        if (liveOnly && !urgent) lastRaster = Clock::now();
     }
     if (urgent || (Clock::now() - lastRaster >= std::chrono::milliseconds(settings.refreshMilliseconds) &&
                    (textureView != request || rasterRevision != cache.revision() || rasterLighting != lighting))) {
+        if (liveOnly) {
+            // Never replace an unfinished future: destroying it would wait on the UI thread.
+            if (liveTask.valid()) return {};
+            if (!liveBuffer) liveBuffer = std::make_shared<MapRasterBuffer>();
+            LiveImage result{request, layer, lighting, settings.showBiomeRegions, cache.revision(), generation, {}, {}};
+            liveTask = std::async(std::launch::async,
+                [snapshot = cache.snapshotForView(layer, request), buffer = liveBuffer, result = std::move(result)]() mutable {
+                    // Destroy tile snapshots on the worker, including when rasterization throws.
+                    auto local = std::move(snapshot);
+                    result.pixels = local.rasterize(result.layer, result.view, result.lighting, buffer.get());
+                    if (result.biomeRegions) result.biomes = rasterizeBiomes(local, result.layer, result.view);
+                    return std::move(result);
+                });
+            lastRaster = Clock::now();
+            return {};
+        }
         lastRaster = Clock::now();
         return request;
     }
@@ -38,6 +63,7 @@ void WayfinderRendering::acceptImage(MapView const& texture, MapLayer layer, std
     pixels = std::move(image);
     biomes = std::move(regions);
     textureView = texture;
+    rasterTarget = texture;
     rasterLayer = layer;
     rasterRevision = revision;
     rasterBiomes = biomeRegions;
@@ -45,7 +71,13 @@ void WayfinderRendering::acceptImage(MapView const& texture, MapLayer layer, std
     ++imageRevision;
 }
 void WayfinderRendering::presentView(MapView const& visible, bool fullscreen) {
-    renderedView = fullscreen ? textureView : visible;
+    renderedView = visible;
+    if (fullscreen) {
+        // Texture dimensions may include rounding padding from the pixel limit.
+        // Keep logical projection/zoom unchanged and crop the padding using UVs.
+        renderedView.centerX = textureView.centerX;
+        renderedView.centerZ = textureView.centerZ;
+    }
 }
 void WayfinderRendering::beginFrame() {
     if (!resetTexture) return;
@@ -55,6 +87,12 @@ void WayfinderRendering::beginFrame() {
     resetTexture = false;
 }
 void WayfinderRendering::shutdown() {
+    // Only shutdown waits. Workers own their snapshots and never touch renderer/engine state.
+    if (liveTask.valid()) {
+        liveTask.wait();
+        liveTask = {};
+    }
+    liveBuffer.reset();
     renderer.reset();
     invalidate();
     biomes = {};

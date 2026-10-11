@@ -58,5 +58,6 @@ private:
     std::vector<std::string>                           mWarnings;
     std::size_t                                       mRejected{};
     TerrainMaterialPool                               mMaterials;
+    MapRasterBuffer                                   mRasterBuffer;
 };
 } // namespace wayfinder

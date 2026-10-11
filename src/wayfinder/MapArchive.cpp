@@ -217,7 +217,7 @@ BiomeMap MapArchive::biomes(MapLayer layer, MapView const& view) {
 }
 
 std::vector<std::uint32_t> MapArchive::rasterize(MapLayer layer, MapView const& view, MapLighting lighting) {
-    MapRaster raster(view, lighting);
+    MapRaster raster(view, lighting, &mRasterBuffer);
     // Loading can isolate a tile (including a north neighbour), invalidating index entries.
     std::vector<TileKey> visible;
     for (auto const& [key, entry] : mIndex) {

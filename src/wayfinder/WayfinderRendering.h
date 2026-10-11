@@ -2,6 +2,7 @@
 #include "wayfinder/MapRenderer.h"
 #include "wayfinder/WayfinderView.h"
 #include <chrono>
+#include <future>
 
 namespace wayfinder {
 // Borrowed read-only data, valid for one synchronous UI callback. Never queued
@@ -32,7 +33,7 @@ public:
         std::vector<std::uint32_t> pixels, BiomeMap biomes, bool biomeRegions, MapLighting lighting);
     void presentView(MapView const& visible, bool fullscreen);
     MapView const& displayedView() const { return renderedView; }
-    void invalidate() { pixels.clear(); lastRaster = {}; }
+    void invalidate() { pixels.clear(); lastRaster = {}; ++generation; }
     void retryImage() { lastRaster = {}; }
     void resetResources() { resetTexture = true; }
     void beginFrame();
@@ -42,7 +43,7 @@ public:
 private:
     std::unique_ptr<MapRenderer> renderer;
     bool resetTexture{};
-    MapView renderedView, textureView;
+    MapView renderedView, textureView, rasterTarget;
     std::vector<std::uint32_t> pixels;
     BiomeMap biomes;
     bool rasterBiomes{};
@@ -50,5 +51,17 @@ private:
     std::uint64_t imageRevision{}, rasterRevision{};
     MapLayer rasterLayer{std::numeric_limits<int>::min()};
     Clock::time_point lastRaster{};
+    struct LiveImage {
+        MapView view;
+        MapLayer layer;
+        MapLighting lighting;
+        bool biomeRegions{};
+        std::uint64_t revision{}, generation{};
+        std::vector<std::uint32_t> pixels;
+        BiomeMap biomes;
+    };
+    std::uint64_t generation{};
+    std::shared_ptr<MapRasterBuffer> liveBuffer;
+    std::future<LiveImage> liveTask;
 };
 } // namespace wayfinder

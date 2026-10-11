@@ -222,12 +222,25 @@ inline ColorAggregate tileOverview(MapTile const& tile, MapLighting lighting = {
 }
 // Area filtering for overview; block-aligned samples and narrow relief edges for close-ups.
 // Unknown cells have zero weight, so small explored islands remain visible in overview.
+struct MapRasterBuffer {
+    std::vector<ColorAggregate> colors;
+};
 class MapRaster {
 public:
-    explicit MapRaster(MapView view, MapLighting lighting = {})
+    explicit MapRaster(MapView view, MapLighting lighting = {}, MapRasterBuffer* buffer = nullptr)
     : mView(view),
       mOrigin(view.worldAt(0, 0)),
-      mColors(static_cast<std::size_t>(view.width) * view.height), mLighting(lighting) {}
+      mColors(buffer ? buffer->colors : mOwnedBuffer.colors), mLighting(lighting) {
+        auto count = static_cast<std::size_t>(view.width) * view.height;
+        // Reuse storage, but do not let vector's geometric growth exceed the pixel budget.
+        if (mColors.capacity() < count) {
+            std::vector<ColorAggregate>().swap(mColors);
+            mColors.resize(count);
+        }
+        else mColors.assign(count, {});
+    }
+    MapRaster(MapRaster const&) = delete;
+    MapRaster& operator=(MapRaster const&) = delete;
     bool intersects(TileKey key) const {
         return key.x * 16.0 < mOrigin[0] + mView.width * mView.blocksPerPixel && key.x * 16.0 + 16 > mOrigin[0]
             && key.z * 16.0 < mOrigin[1] + mView.height * mView.blocksPerPixel && key.z * 16.0 + 16 > mOrigin[1];
@@ -354,7 +367,8 @@ private:
 
     MapView                     mView;
     std::array<double, 2>       mOrigin;
-    std::vector<ColorAggregate> mColors;
+    MapRasterBuffer             mOwnedBuffer;
+    std::vector<ColorAggregate>& mColors;
     MapLighting                 mLighting;
 };
 
@@ -435,6 +449,31 @@ public:
         for (auto const& [key, tile] : mTiles) result.push_back({key, tile});
         return result;
     }
+    // A worker owns this copy. Only visible tiles and their shading halo are copied;
+    // immutable materials remain shared and no game objects cross the thread boundary.
+    MapCache snapshotForView(MapLayer layer, MapView const& view) const {
+        MapCache result(mCapacity);
+        auto origin = view.worldAt(0, 0), end = view.worldAt(view.width, view.height);
+        for (auto const& [key, tile] : mTiles)
+            if (key.layer() == layer && key.x * 16.0 < end[0] + 16 && (key.x + 1) * 16.0 > origin[0] - 16
+                && key.z * 16.0 < end[1] + 16 && (key.z + 1) * 16.0 > origin[1] - 16)
+                result.mTiles.emplace(key, tile);
+        result.mRevision = mRevision;
+        return result;
+    }
+    // Bounded emergency preview: one representative sample per pixel, no tile scan,
+    // area filtering, material rasterization or full-resolution scratch allocation.
+    void preview(MapLayer layer, MapView const& view, MapLighting lighting, std::vector<std::uint32_t>& pixels) const {
+        pixels.resize(static_cast<std::size_t>(view.width) * view.height);
+        for (int row = 0; row < view.height; ++row) for (int col = 0; col < view.width; ++col) {
+            auto world = view.worldAt(col + 0.5, row + 0.5);
+            int x = blockCoordinate(world[0]), z = blockCoordinate(world[1]);
+            auto cell = get(layer, x, z);
+            pixels[static_cast<std::size_t>(row) * view.width + col] = cell.known()
+                ? litColor(shadedColor(cell, get(layer, x, z - 1), get(layer, x - 1, z)), cell, lighting)
+                : ((floorDiv(x, 16) ^ floorDiv(z, 16)) & 1) ? rgba(23, 30, 38) : rgba(26, 33, 41);
+        }
+    }
     void restore(std::vector<TileRecord> records) {
         clear();
         std::stable_sort(records.begin(), records.end(), [](auto const& a, auto const& b) {
@@ -477,8 +516,9 @@ public:
     std::size_t   size() const { return mTiles.size(); }
     std::size_t   capacity() const { return mCapacity; }
 
-    std::vector<std::uint32_t> rasterize(MapLayer layer, MapView const& view, MapLighting lighting = {}) const {
-        MapRaster raster(view, lighting);
+    std::vector<std::uint32_t> rasterize(MapLayer layer, MapView const& view, MapLighting lighting = {},
+                                        MapRasterBuffer* buffer = nullptr) const {
+        MapRaster raster(view, lighting, buffer);
         for (auto const& [key, tile] : mTiles)
             if (key.layer() == layer && raster.intersects(key)) {
                 if (view.blocksPerPixel >= 32) {
